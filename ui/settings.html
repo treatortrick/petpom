@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>设置 · petpom</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; user-select:none; -webkit-user-select:none; }
+  body { font-family:-apple-system,"PingFang SC",sans-serif; background:#fff; color:#3d3833; }
+  .head { padding:14px 20px 10px; border-bottom:1px solid #f0e9dc; font-size:15px; font-weight:600; }
+  .body { padding:8px 20px 16px; }
+  .sec { font-size:12px; color:#a89f90; margin:14px 0 4px; font-weight:600; }
+  .row { display:flex; justify-content:space-between; align-items:center; padding:9px 0; border-bottom:1px dashed #f0ead9; }
+  .rlabel { font-size:13.5px; }
+  .stepper { display:flex; align-items:center; gap:8px; font-size:13px; }
+  .stepper button { width:24px; height:24px; border:1px solid #e0d8c8; background:#faf7f0; border-radius:6px;
+                    color:#8a8378; cursor:pointer; font-size:14px; line-height:1; }
+  .stepper button:hover { background:#f3ede1; }
+  .stepper b { min-width:30px; text-align:center; font-size:15px; }
+  .stepper small { color:#a89f90; margin-left:-4px; }
+
+  .tgl { width:38px; height:22px; background:#e0d8c8; border-radius:11px; position:relative; cursor:pointer; transition:background .15s; }
+  .tgl i { position:absolute; top:2px; left:2px; width:18px; height:18px; background:#fff; border-radius:50%;
+           box-shadow:0 1px 3px rgba(0,0,0,.2); transition:left .15s; }
+  .tgl.on { background:#e8975a; }
+  .tgl.on i { left:18px; }
+  .pets-card { display:flex; gap:12px; padding:10px 0; }
+  .pc { flex:1; border:1.5px solid #e0d8c8; border-radius:12px; padding:10px; text-align:center;
+        font-size:12px; color:#8a8378; cursor:pointer; }
+  .pc:hover { background:#fdf9f2; }
+  .pc.sel { border-color:#e8975a; background:#fdf4e9; color:#b06a2a; font-weight:600; }
+  .pc.dis { opacity:.45; cursor:default; }
+  .pc .mini { width:64px; height:64px; margin:0 auto 6px; }
+  .pc .mini img { width:100%; height:100%; image-rendering:pixelated; }
+  .rnote { font-size:12px; color:#a89f90; padding:2px 0 8px; border-bottom:1px dashed #f0ead9; }
+  .nin { width:140px; padding:4px 9px; border:1px solid #e0d8c8; border-radius:8px; font-size:13px;
+         text-align:right; background:#faf7f0; color:#3d3833; outline:none; }
+  .nin:focus { border-color:#e8975a; }
+  .nin::placeholder { color:#c9c0af; }
+  .foot { padding:10px 20px; font-size:11.5px; color:#c9c0af; border-top:1px solid #f0e9dc; }
+</style>
+</head>
+<body>
+<div class="head">设置</div>
+<div class="body">
+  <div class="sec">番茄方案</div>
+  <div class="row"><span class="rlabel">专注时长</span>
+    <div class="stepper"><button data-k="focus_min" data-d="-1">−</button><b id="v-focus_min">25</b><small>分钟</small><button data-k="focus_min" data-d="1">＋</button></div></div>
+  <div class="row"><span class="rlabel">短休息</span>
+    <div class="stepper"><button data-k="short_min" data-d="-1">−</button><b id="v-short_min">5</b><small>分钟</small><button data-k="short_min" data-d="1">＋</button></div></div>
+  <div class="row"><span class="rlabel">每 N 轮长休息</span>
+    <div class="stepper"><button data-k="long_every" data-d="-1">−</button><b id="v-long_every">4</b><small>轮</small><button data-k="long_every" data-d="1">＋</button></div></div>
+  <div class="row"><span class="rlabel">长休息</span>
+    <div class="stepper"><button data-k="long_min" data-d="-5">−</button><b id="v-long_min">15</b><small>分钟</small><button data-k="long_min" data-d="5">＋</button></div></div>
+
+  <div class="sec">形象</div>
+  <div class="pets-card" id="pet-cards">
+    <div class="pc" data-v="tuantuan"><div class="mini"><img src="assets/petpacks/tuantuan/anims/walk/walk-01.png"></div>团团 · 橘猫</div>
+    <div class="pc" data-v="shiba"><div class="mini"><img src="assets/petpacks/shiba/anims/walk/walk-01.png"></div>奶油柴犬</div>
+    <div class="pc dis"><div class="mini"></div>？？？<div style="font-size:11px;margin-top:22px">V1 敬请期待</div></div>
+  </div>
+  <div class="rnote">切换形象立即生效，位置与计时不受影响。</div>
+  <div class="row"><span class="rlabel">给它取个名字（气泡里会这么叫它）</span>
+    <input id="pet-name" class="nin" maxlength="12" placeholder="默认：奶油 / 团团">
+  </div>
+
+  <div class="sec">通用</div>
+  <div class="row"><span class="rlabel">鼠标穿透（纯观赏，托盘可关）</span><div class="tgl" data-k="click_through"><i></i></div></div>
+  <div class="row"><span class="rlabel">开机自启</span><div class="tgl" data-k="autostart"><i></i></div></div>
+  <div class="row"><span class="rlabel">专注时隐藏提醒气泡（仅宠物动画）</span><div class="tgl" data-k="hide_bubble"><i></i></div></div>
+</div>
+<div class="foot">petpom v0.1.0 · 数据仅存本机 SQLite</div>
+<script src="settings.js"></script>
+</body>
+</html>
