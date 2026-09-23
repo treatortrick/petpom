@@ -27,6 +27,7 @@
   const pillCountdown = document.getElementById("pill-countdown");
   const toastEl = document.getElementById("toast");
   const settleEl = document.getElementById("settle");
+  const cardEl = document.getElementById("card-pop");
 
   // 无障碍（P0-5）：系统开启「减少动态效果」时停掉装饰性动效
   // （呼吸、Zzz、小动作、自转、hover 反应）；承载信息的状态动画保留
@@ -624,7 +625,8 @@
      第 3 档指引（badgeHintUntil）期间即便有气泡也要保持可见。 */
   function syncDuck() {
     const covered =
-      bubbleEl.classList.contains("show") || settleEl.classList.contains("show");
+      bubbleEl.classList.contains("show") || settleEl.classList.contains("show") ||
+      cardEl.classList.contains("show");
     badgeEl.classList.toggle("duck", covered && Date.now() >= badgeHintUntil);
   }
   badgeEl.addEventListener("pointerdown", (e) => e.stopPropagation());
@@ -633,6 +635,36 @@
   });
 
   /* ============ Rust 事件 ============ */
+  /* ============ 探险带回的卡片（温和期待型的核心反馈） ============
+   * 它回来时：播 happy + 弹出卡片（稀有度/名字/它想说的话）+ 气泡。
+   * 离线产出：app 没开时也在走时间，启动补结算的卡片会带 startup 标记。 */
+  let cardTimer = null;
+  function showCard(p) {
+    const rare = (p.rarity || 0) >= 2;
+    cardEl.className = ""; // 复位
+    cardEl.innerHTML =
+      `<div class="c-rarity">${p.rarity_label || ""} · 它带回来的</div>` +
+      `<div class="c-name">${p.name}</div>` +
+      `<div class="c-text">${p.text}</div>` +
+      `<div class="c-foot">已收进它的小窝（右键菜单 → 设置 → 小窝）</div>`;
+    if (rare) cardEl.classList.add("rare");
+    void cardEl.offsetWidth;
+    cardEl.classList.add("show");
+    syncDuck();
+    clearTimeout(cardTimer);
+    cardTimer = setTimeout(() => {
+      cardEl.classList.remove("show");
+      syncDuck();
+    }, 7000);
+  }
+
+  function onCardReturn(p) {
+    play("happy", { onDone: () => play(lastSteadyState) });
+    const lead = p.startup ? "我回来啦！" : "我回来啦！";
+    bubble(`${lead}给你带了「${p.name}」`, 4200);
+    showCard(p);
+  }
+
   async function setup() {
     await listen("pet/set-pack", (e) => {
       loadPack(e.payload.pack);
@@ -683,6 +715,7 @@
       if (p === "idle" || p.startsWith("alert-")) badgeEl.classList.remove("on");
     });
     await listen("stats/settle", (e) => showSettle(e.payload));
+    await listen("pet/card", (e) => onCardReturn(e.payload));
 
     try {
       const packName = await invoke("get_current_pack");

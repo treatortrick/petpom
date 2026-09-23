@@ -34,6 +34,9 @@ struct Settings {
     bond: i64,
     pet_x: f64,
     pet_y: f64,
+    /// 最近一次「每日首次」送鱼日期（YYYY-MM-DD）。只做惊喜，不做断签惩罚：
+    /// 漏一天就是少一条鱼，没有连续奖励、没有补签、没有损失。
+    last_gift_date: String,
 }
 
 impl Default for Settings {
@@ -52,6 +55,7 @@ impl Default for Settings {
             bond: 0,
             pet_x: -1.0,
             pet_y: -1.0,
+            last_gift_date: String::new(),
         }
     }
 }
@@ -77,6 +81,7 @@ impl Settings {
         from_db("bond", &mut |v| s.bond = v.parse().unwrap_or(s.bond));
         from_db("pet_x", &mut |v| s.pet_x = v.parse().unwrap_or(s.pet_x));
         from_db("pet_y", &mut |v| s.pet_y = v.parse().unwrap_or(s.pet_y));
+        from_db("last_gift_date", &mut |v| s.last_gift_date = v.to_string());
         s
     }
 
@@ -95,10 +100,19 @@ impl Settings {
             "bond" => self.bond.to_string(),
             "pet_x" => self.pet_x.to_string(),
             "pet_y" => self.pet_y.to_string(),
+            "last_gift_date" => self.last_gift_date.clone(),
             _ => return,
         };
         db.set_setting(key, &v);
     }
+}
+
+/// 探险看门狗：到点就把卡片带回来（app 没开时的时间差在启动补结算里处理）
+fn spawn_expedition_watcher(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        settle_due_expeditions(&app, false);
+    });
 }
 
 struct AppState {
@@ -253,6 +267,119 @@ fn hide_alert_ui(app: &AppHandle, pet_state: &str) {
     if !pet_state.is_empty() {
         let _ = app.emit("pet/state", serde_json::json!({ "state": pet_state }));
     }
+}
+
+// ---------- 它的小窝：探险带回的卡片池（2026-09-23） ----------
+// 调性：温暖、克制、不夸张。卡片 = 它出门路上捡到的小东西 + 一句它想说的话。
+// rarity: 0 普通 / 1 少见 / 2 稀有
+struct Card {
+    key: &'static str,
+    name: &'static str,
+    text: &'static str,
+    rarity: u8,
+}
+
+const CARDS: &[Card] = &[
+    // —— 普通 ——
+    Card { key: "pebble", name: "海边的小石头", text: "被水磨得很圆，握在手里温温的。", rarity: 0 },
+    Card { key: "leaf", name: "一片银杏叶", text: "黄得刚刚好，我夹在书里带回来了。", rarity: 0 },
+    Card { key: "cocoa", name: "热可可的纸杯", text: "喝完了，但杯壁还留着一点甜味。", rarity: 0 },
+    Card { key: "feather", name: "一根羽毛", text: "不知道是谁掉的，很轻，放在窗台会飘。", rarity: 0 },
+    Card { key: "ticket", name: "半张旧车票", text: "上面的字都褪了，只看得清一个日期。", rarity: 0 },
+    Card { key: "flower", name: "一朵小野花", text: "长在路边石缝里，我小心地摘了。", rarity: 0 },
+    Card { key: "chestnut", name: "一颗栗子", text: "掉在地上，还带着壳的刺。", rarity: 0 },
+    Card { key: "sunlight", name: "窗台上的阳光", text: "我趴了一会儿，暖的。分你一半。", rarity: 0 },
+    Card { key: "cloud", name: "云的影子", text: "从屋顶上慢慢走过去，我数了七秒。", rarity: 0 },
+    Card { key: "notecard", name: "它的便签", text: "写着：今天也要记得喝水。", rarity: 0 },
+    // —— 少见 ——
+    Card { key: "wish", name: "陌生人的心愿便签", text: "贴在路灯上，写着「希望妈妈早点好起来」。", rarity: 1 },
+    Card { key: "key", name: "生锈的小钥匙", text: "不知道开哪扇门，我先收好了。", rarity: 1 },
+    Card { key: "ladybug", name: "睡着的瓢虫", text: "在叶子背面，我看了很久没舍得弄醒它。", rarity: 1 },
+    Card { key: "marble", name: "玻璃弹珠", text: "对着光看，里面有彩色的细线。", rarity: 1 },
+    Card { key: "recipe", name: "手写的食谱", text: "字很好看，只抄到一半：「小火，慢慢来」。", rarity: 1 },
+    // —— 稀有 ——
+    Card { key: "clover", name: "四叶草", text: "蹲下来找了很久。这个给你，会好运的。", rarity: 2 },
+    Card { key: "seaglass", name: "海玻璃", text: "在河边捡的，被水磨了不知道多少年。", rarity: 2 },
+    Card { key: "star", name: "夜里的一颗星", text: "我盯了很久，好像真的摘到了一颗。", rarity: 2 },
+    Card { key: "coin", name: "一枚旧硬币", text: "年份比我大得多，边缘被摸得发亮。", rarity: 2 },
+    Card { key: "rainbow", name: "一小片彩虹", text: "雨后出现在水洼里，只停了两分钟。", rarity: 2 },
+];
+
+fn card_by_key(key: &str) -> Option<&'static Card> {
+    CARDS.iter().find(|c| c.key == key)
+}
+
+const RARITY_LABEL: [&str; 3] = ["寻常", "少见", "珍贵"];
+
+fn roll_card() -> &'static Card {
+    let n = nanos();
+    let roll = (n / 7) % 100; // 与探险时长用的随机位错开
+    let rarity: u8 = if roll < 10 { 2 } else if roll < 40 { 1 } else { 0 };
+    let pool: Vec<&Card> = CARDS.iter().filter(|c| c.rarity == rarity).collect();
+    pool[(n as usize / 13) % pool.len()]
+}
+
+fn nanos() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0)
+}
+
+/// 气泡（尊重「专注时隐藏气泡」设置）
+fn say(app: &AppHandle, text: &str, ms: u64) {
+    let state = app.state::<AppState>();
+    if state.settings.lock().unwrap().hide_bubble {
+        return;
+    }
+    let _ = app.emit("pet/bubble", serde_json::json!({ "text": text, "ms": ms }));
+}
+
+/// 探险到点结算：把卡片收进小窝并通知前端。
+/// startup=true 表示这是 app 启动时的补结算（离线产出：app 没开也在走时间）
+fn settle_due_expeditions(app: &AppHandle, startup: bool) {
+    let state = app.state::<AppState>();
+    let now = chrono::Local::now();
+    let due = state.db.due_expeditions(now.timestamp());
+    if due.is_empty() {
+        return; // 无变化不重建托盘（看门线程每 20s 跑一次，否则菜单会一直闪）
+    }
+    for (id, key) in due {
+        let stamp = now.format("%Y-%m-%d %H:%M:%S").to_string();
+        state.db.return_expedition(id, &key, &stamp);
+        if let Some(card) = card_by_key(&key) {
+            let _ = app.emit(
+                "pet/card",
+                serde_json::json!({
+                    "key": card.key, "name": card.name, "text": card.text,
+                    "rarity": card.rarity, "rarity_label": RARITY_LABEL[card.rarity as usize],
+                    "startup": startup,
+                }),
+            );
+        }
+    }
+    rebuild_tray_later(app);
+}
+
+/// 每天第一次打开时送一条小鱼干。纯惊喜，不做连续奖励、不惩罚漏签。
+fn daily_first_gift(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    {
+        let mut s = state.settings.lock().unwrap();
+        if s.last_gift_date == today {
+            return;
+        }
+        s.last_gift_date = today;
+        s.snacks = (s.snacks + 1).min(9);
+        s.save_key(&state.db, "last_gift_date");
+        s.save_key(&state.db, "snacks");
+    }
+    let s = state.settings.lock().unwrap().clone();
+    let _ = app.emit("pet/state", serde_json::json!({ "state": "happy" }));
+    say(app, &named("今天的第一条小鱼干，{n}给你带了一条～", &s), 4500);
+    rebuild_tray_later(app);
 }
 
 // ---------- 托盘 ----------
@@ -493,27 +620,53 @@ fn set_pet_hidden(app: &AppHandle, hide: bool) {
 }
 
 /// 投喂：零食 -1、亲密度 +1，播吃动画（eat 资产未到位时前端自动回退 happy）+ 谢投喂气泡
+/// 投喂小鱼干 = 送它出门探险（2026-09-23 改版）
+/// 机制取向「温和期待型」：回来一定会带东西，带什么不确定；
+/// 不惩罚缺席、不衰减、不索要——只为「想知道它带回了什么」而回来。
 fn feed_pet_internal(app: &AppHandle) {
     let state = app.state::<AppState>();
-    {
-        let mut s = state.settings.lock().unwrap();
-        if s.snacks <= 0 {
+    let now = chrono::Local::now();
+
+    // 1) 还在外面：给明确反馈（旧版是灰掉菜单项，用户不知道发生了什么）
+    if let Some((_, due, _, _)) = state.db.active_expedition() {
+        if due > now.timestamp() {
+            let left = ((due - now.timestamp()) as f64 / 60.0).ceil() as i64;
+            say(app, &format!("它还在外面转悠呢，大概 {} 分钟后回来～", left.max(1)), 4000);
             return;
         }
+    }
+
+    // 2) 没有鱼：说清楚鱼从哪来（这是新用户唯一能得到的引导）
+    let snacks = state.settings.lock().unwrap().snacks;
+    if snacks <= 0 {
+        say(app, "小鱼干不够啦～ 完成一轮专注我会带一颗回来。", 4500);
+        return;
+    }
+
+    // 3) 出发：扣鱼 + 亲密度 +1 + 抽定卡片 + 定到点时间
+    let card = roll_card();
+    let mins = 12 + (nanos() % 17) as i64; // 12~28 分钟，随机但一定有结果
+    let due = now + chrono::Duration::minutes(mins);
+    {
+        let mut s = state.settings.lock().unwrap();
         s.snacks -= 1;
         s.bond += 1; // 亲密度只增不减，无衰减惩罚
         s.save_key(&state.db, "snacks");
         s.save_key(&state.db, "bond");
     }
-    let settings = state.settings.lock().unwrap().clone();
-    let text = pick(&[
-        "谢谢投喂，{n}开动啦！",
-        "呜哇，是小鱼干！{n}最喜欢了～",
-        "为了零食，下一轮也要加油！",
-        "好吃到转圈圈…（吧唧吧唧）",
-    ]);
+    state.db.start_expedition(
+        &now.format("%Y-%m-%d %H:%M:%S").to_string(),
+        due.timestamp(),
+        card.key,
+    );
+
+    let s = state.settings.lock().unwrap().clone();
     let _ = app.emit("pet/state", serde_json::json!({ "state": "eat" }));
-    let _ = app.emit("pet/bubble", serde_json::json!({ "text": named(text, &settings), "ms": 4000 }));
+    say(
+        app,
+        &named("（吧唧吧唧）我去去就回，等我带点好东西回来！", &s),
+        4200,
+    );
     rebuild_tray_later(app);
 }
 
@@ -535,6 +688,49 @@ fn note_distraction(state: tauri::State<AppState>) {
     state.distractions.fetch_add(1, Ordering::SeqCst);
 }
 
+
+/// 它的小窝：卡片图鉴 + 收集进度 + 进行中的探险（设置页「小窝」用）
+#[tauri::command]
+fn get_den(state: tauri::State<AppState>) -> serde_json::Value {
+    let owned = state.db.den_cards();
+    let owned_keys: std::collections::HashMap<String, (String, i64)> = owned
+        .iter()
+        .map(|(k, at, seen)| (k.clone(), (at.clone(), *seen)))
+        .collect();
+    let now = chrono::Local::now().timestamp();
+    let cards: Vec<serde_json::Value> = CARDS
+        .iter()
+        .map(|c| {
+            let got = owned_keys.get(c.key);
+            serde_json::json!({
+                "key": c.key, "name": c.name, "text": c.text,
+                "rarity": c.rarity, "rarity_label": RARITY_LABEL[c.rarity as usize],
+                "owned": got.is_some(),
+                "obtained_at": got.map(|g| g.0.clone()).unwrap_or_default(),
+                "seen": got.map(|g| g.1).unwrap_or(1),
+            })
+        })
+        .collect();
+    let trip = match state.db.active_expedition() {
+        Some((_, due, _, started)) if due > now => serde_json::json!({
+            "active": true, "remain_sec": due - now, "started_at": started
+        }),
+        _ => serde_json::json!({ "active": false }),
+    };
+    serde_json::json!({
+        "total": CARDS.len(),
+        "owned": owned_keys.len(),
+        "unseen": state.db.unseen_count(),
+        "cards": cards,
+        "trip": trip,
+    })
+}
+
+/// 看过小窝就把新卡片标记已读
+#[tauri::command]
+fn mark_den_seen(state: tauri::State<AppState>) {
+    state.db.mark_den_seen();
+}
 
 #[tauri::command]
 fn get_settings(state: tauri::State<AppState>) -> Settings {
@@ -744,13 +940,26 @@ fn build_context_menu(
         if phase == "rest" { "跳过这次休息" } else { "跳过这次专注" },
     )
     .build(app)?;
-    let feed = tauri::menu::MenuItemBuilder::with_id(
-        "feed",
-        format!("投喂 · 小鱼干 ×{}", s.snacks),
-    )
-    .enabled(s.snacks > 0)
-    .build(app)?;
-    let settings_item = tauri::menu::MenuItemBuilder::with_id("settings", "设置…").build(app)?;
+    // 投喂项：2026-09-23 起不再灰掉——没鱼/已出门时点它都会得到明确解释，
+    // 灰掉只会让用户不知道发生了什么（旧版正是如此）
+    let st = app.state::<AppState>();
+    let trip_left = st
+        .db
+        .active_expedition()
+        .filter(|(_, due, _, _)| *due > chrono::Local::now().timestamp())
+        .map(|(_, due, _, _)| ((due - chrono::Local::now().timestamp() + 59) / 60).max(1));
+    let feed_label = match trip_left {
+        Some(m) => format!("它出门中 · 约 {} 分钟后回来", m),
+        None => format!("投喂小鱼干 · 还有 ×{}", s.snacks),
+    };
+    let feed = tauri::menu::MenuItemBuilder::with_id("feed", feed_label).build(app)?;
+    let unseen = st.db.unseen_count();
+    let settings_label = if unseen > 0 {
+        format!("设置…（小窝有 {} 件新东西）", unseen)
+    } else {
+        "设置…".to_string()
+    };
+    let settings_item = tauri::menu::MenuItemBuilder::with_id("settings", settings_label).build(app)?;
     let hide_pet = tauri::menu::MenuItemBuilder::with_id("hide_pet", "隐藏桌宠").build(app)?;
     let quit = tauri::menu::MenuItemBuilder::with_id("quit", "退出 PetPom").build(app)?;
 
@@ -794,8 +1003,15 @@ fn show_context_menu(app: AppHandle) {
 }
 
 #[tauri::command]
-fn frontend_ready(info: String) {
+fn frontend_ready(app: AppHandle, info: String) {
     eprintln!("[frontend] ready: {}", info);
+    // 前端就绪后再触发（这两件事都要弹气泡，页面没加载完会丢）
+    let a = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        settle_due_expeditions(&a, true); // 离线产出：app 没开也在走时间
+        daily_first_gift(&a);             // 每天第一条鱼
+    });
 }
 
 #[tauri::command]
@@ -882,6 +1098,8 @@ fn main() {
                     .unwrap_or(0);
                 record_db.lock().unwrap().insert_round(start_unix, min as i64, snoozes as i64, result);
             });
+            spawn_expedition_watcher(handle.clone());
+            spawn_expedition_watcher(handle.clone());
             let timer = timer::spawn(
                 handle.clone(),
                 record,
@@ -1006,6 +1224,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             note_distraction,
+            get_den,
+            mark_den_seen,
             get_current_pack,
             set_settings,
             drag_move,

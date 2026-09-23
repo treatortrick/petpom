@@ -82,5 +82,48 @@
     });
   }
 
+  /* ============ 它的小窝 ============ */
+  const denGrid = document.getElementById("den-grid");
+  function renderDen(d) {
+    document.getElementById("den-owned").textContent = d.owned;
+    document.getElementById("den-total").textContent = d.total;
+    const unseen = document.getElementById("den-unseen");
+    unseen.innerHTML = d.unseen > 0 ? `<span class="badge-n">${d.unseen} 新</span>` : "";
+    const trip = document.getElementById("den-trip");
+    if (d.trip && d.trip.active) {
+      const m = Math.ceil(d.trip.remain_sec / 60);
+      trip.textContent = `它正在外面转悠，大约 ${m} 分钟后回来。`;
+    } else {
+      trip.textContent = "投喂一条小鱼干，它就出门去逛逛（回来一定会带点东西）。";
+    }
+    if (!denGrid) return;
+    denGrid.innerHTML = d.cards
+      .map((c) => {
+        if (!c.owned) {
+          return `<div class="dc lock r${c.rarity}"><div class="t">？？？</div>` +
+                 `<div class="d">${c.rarity_label} · 还没遇见</div></div>`;
+        }
+        const day = (c.obtained_at || "").slice(0, 10);
+        const isNew = c.seen === 0 ? " new" : "";
+        return `<div class="dc r${c.rarity}${isNew}"><div class="t">${c.name}</div>` +
+               `<div class="d">${c.text}</div>` +
+               `<div class="m">${c.rarity_label} · ${day}</div></div>`;
+      })
+      .join("");
+  }
+
+  async function loadDen() {
+    try {
+      const d = await invoke("get_den");
+      renderDen(d);
+      if (d.unseen > 0) {
+        await invoke("mark_den_seen");
+      }
+    } catch (e) {
+      if (denGrid) denGrid.innerHTML = `<div class="dc lock"><div class="d">小窝读取失败：${e}</div></div>`;
+    }
+  }
+
   load();
+  loadDen();
 })();

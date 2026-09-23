@@ -27,6 +27,23 @@
                    image-rendering:pixelated; pointer-events:none; -webkit-user-drag:none; }
   #pet img.frame.on { display:block; }
 
+  /* 探险带回的卡片（P：温和期待型的核心反馈时刻）
+     出现在宠物上方，约 7 秒淡出；期间时间牌避让 */
+  #card-pop { position:absolute; left:50%; top:8px; width:230px; padding:11px 13px 12px;
+              background:rgba(255,253,247,.97); border:1px solid #f0e6d2; border-radius:13px;
+              box-shadow:0 8px 22px rgba(90,70,40,.14);
+              opacity:0; transform:translateX(-50%) translateY(-8px) scale(.97);
+              transition:opacity .26s ease, transform .26s cubic-bezier(.2,.9,.3,1);
+              pointer-events:none; }
+  #card-pop.show { opacity:1; transform:translateX(-50%) translateY(0) scale(1); }
+  #card-pop .c-rarity { font-size:11px; color:#b08a56; letter-spacing:.5px; }
+  #card-pop .c-name { font-size:14px; font-weight:500; color:#4a4238; margin:2px 0 4px; }
+  #card-pop .c-text { font-size:12px; line-height:1.55; color:#6b6357; }
+  #card-pop .c-foot { margin-top:7px; padding-top:6px; border-top:1px dashed #f0ead9;
+                      font-size:11px; color:#a89f90; }
+  #card-pop.rare .c-rarity { color:#c2703a; }
+  #card-pop.rare { border-color:#f0d9b8; }
+
   /* ===== 程序补间动作（幅度克制，避免与帧动画打架） ===== */
   @keyframes mBreath { 0%,100% { transform:scale(1,1) translateY(0); } 50% { transform:scale(1.008,1.022) translateY(0); } }
   @keyframes mDoze   { 0%,100% { transform:scale(1,1); } 50% { transform:scale(1.012,1.035); } }
@@ -135,13 +152,14 @@
     #pet .motion { animation:none !important; }
     #timer-badge.hint { animation:none; }
     .zzz { display:none; }
-    #timer-badge, #bubble, #pill, #settle, #pet .anim { transition:none; }
+    #timer-badge, #bubble, #pill, #settle, #card-pop, #pet .anim { transition:none; }
   }
 </style>
 </head>
 <body>
 <div id="stage">
   <div id="settle"></div>
+  <div id="card-pop"></div>
   <div id="timer-badge"><span class="t-label">专注中</span><span class="t-time">00:00</span></div>
   <div id="bubble"></div>
   <div id="pet"><div class="motion"></div></div>
