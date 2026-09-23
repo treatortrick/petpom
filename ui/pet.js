@@ -457,6 +457,10 @@
   });
 
   function petAction() {
+    if (petAway) {
+      bubble("它还在外面转悠呢，回来就会知道带了什么～", 3600);
+      return;
+    }
     if (alerting && alertKind === "focus-end") {
       // 摸头 = 婉拒（等效按钮）；超限时摸头无效并吐槽
       if (!pillLimited) {
@@ -635,6 +639,25 @@
   });
 
   /* ============ Rust 事件 ============ */
+  /* ============ 出门 / 回来（2026-09-23） ============
+   * 出门：eat → leave（走出画布左缘）→ 淡出，桌面不留痕迹
+   * 回来：淡入 → return（跑回来）→ 落定后弹卡片
+   * 期间点它是无效的，给一句解释而不是没反应。 */
+  let petAway = false;
+  function setAway(away) {
+    petAway = away;
+    petEl.classList.toggle("away", away);
+  }
+  function depart() {
+    if (!pack || !pack.anims.leave) { setAway(true); return; }
+    play("leave", { onDone: () => setAway(true) });
+  }
+  function comeBack(done) {
+    setAway(false);
+    if (pack && pack.anims.return) play("return", { onDone: done });
+    else done();
+  }
+
   /* ============ 探险带回的卡片（温和期待型的核心反馈） ============
    * 它回来时：播 happy + 弹出卡片（稀有度/名字/它想说的话）+ 气泡。
    * 离线产出：app 没开时也在走时间，启动补结算的卡片会带 startup 标记。 */
@@ -659,9 +682,8 @@
   }
 
   function onCardReturn(p) {
-    play("happy", { onDone: () => play(lastSteadyState) });
-    const lead = p.startup ? "我回来啦！" : "我回来啦！";
-    bubble(`${lead}给你带了「${p.name}」`, 4200);
+    comeBack(() => play(lastSteadyState));
+    bubble(`我回来啦！给你带了「${p.name}」`, 4200);
     showCard(p);
   }
 
@@ -681,9 +703,9 @@
         // 反应插播（interaction-spec #3/#4）：播一遍回原状态，不改 lastSteadyState
         if (pack.anims[s]) play(s, { onDone: () => play(lastSteadyState) });
       } else if (s === "eat") {
-        // 投喂（interaction-spec #9）：eat 资产未到位时回退 happy
+        // 投喂：吃完就出门（eat → leave → 淡出）
         const key = pack.anims.eat ? "eat" : "happy";
-        play(key, { onDone: () => play(lastSteadyState) });
+        play(key, { onDone: () => depart() });
       } else if (s === "happy" || s === "sad") {
         setSteady("idle");
         play(s, { onDone: () => play(lastSteadyState) });
@@ -720,6 +742,11 @@
     try {
       const packName = await invoke("get_current_pack");
       await loadPack(packName);
+      // 启动时若它正在外面（含关 app 期间出发的），直接隐身等待
+      try {
+        const den = await invoke("get_den");
+        if (den && den.trip && den.trip.active) setAway(true);
+      } catch (_) {}
       try { petName = (await invoke("get_pet_name")) || petName; } catch (_) {}
       invoke("frontend_ready", { info: "pack=" + packName }).catch(
         (e) => invoke("frontend_error", { msg: "ready-fail: " + String(e) }).catch(() => {})

@@ -44,6 +44,11 @@
   #card-pop.rare .c-rarity { color:#c2703a; }
   #card-pop.rare { border-color:#f0d9b8; }
 
+  /* 出门期间桌宠淡出：窗口本身是透明的，桌面上不留痕迹 */
+  #pet { transition:opacity .55s ease; }
+  #pet.away { opacity:0; }
+  @media (prefers-reduced-motion: reduce) { #pet { transition:none; } }
+
   /* ===== 程序补间动作（幅度克制，避免与帧动画打架） ===== */
   @keyframes mBreath { 0%,100% { transform:scale(1,1) translateY(0); } 50% { transform:scale(1.008,1.022) translateY(0); } }
   @keyframes mDoze   { 0%,100% { transform:scale(1,1); } 50% { transform:scale(1.012,1.035); } }

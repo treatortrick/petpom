@@ -21,7 +21,9 @@
     "eat": 6,
     "focus-tidy": 6,
     "rest-stretch": 6,
-    "focus-nudge": 4
+    "focus-nudge": 4,
+    "leave": 6,
+    "return": 6
   },
   "fps": {
     "idle": 5,
@@ -39,7 +41,9 @@
     "eat": 8,
     "focus-tidy": 7,
     "rest-stretch": 7,
-    "focus-nudge": 6
+    "focus-nudge": 6,
+    "leave": 7,
+    "return": 7
   },
   "loop": {
     "idle": true,
@@ -57,7 +61,9 @@
     "eat": false,
     "focus-tidy": false,
     "rest-stretch": false,
-    "focus-nudge": false
+    "focus-nudge": false,
+    "leave": false,
+    "return": false
   },
   "motion": {
     "_note": "程序补间层（关键姿势之间的连续运动由 CSS 驱动，不占帧）：none|breath|doze|sway|bounce|press。键必须是 play() 实际收到的状态名（focus/rest/idle…），不是动画名",
@@ -72,7 +78,9 @@
     "eat": "press",
     "focus-read": "breath",
     "focus-tidy": "breath",
-    "rest-stretch": "breath"
+    "rest-stretch": "breath",
+    "leave": "none",
+    "return": "none"
   },
   "states": {
     "idle": {
@@ -125,10 +133,19 @@
     "focus-nudge": {
       "anim": "focus-nudge",
       "note": "专注中被点击：抬头看你 → 摇头 → 趴回继续守着"
+    },
+    "leave": {
+      "anim": "leave",
+      "note": "投喂后出门：走出画布左缘，随后前端淡出（app 未运行时也在走时间）"
+    },
+    "return": {
+      "anim": "return",
+      "note": "探险回来：从左侧跑回、带小包，落定后弹卡片"
     }
   },
   "micro_note": "micro-* 首帧=常态、中帧=变化、末帧=回常态，播完回稳定态；micro-blink 直接取自 idle 视频的眨眼帧",
   "ambient_note": "focus-tidy 每 60~120 秒随机插播一次后回 focus；rest-stretch 休息开始 20 秒后播一次",
   "particles_note": "Zzz 粒子由引擎运行时叠加，不烧进帧",
-  "rendering": "image-rendering:pixelated；画布 192 与显示尺寸 192 严格 1:1（Retina 下 2× 整数缩放）"
+  "rendering": "image-rendering:pixelated；画布 192 与显示尺寸 192 严格 1:1（Retina 下 2× 整数缩放）",
+  "travel_note": "leave / return 是位移动画，必须用 build_v2.py --travel leave,return 处理（所有帧共用裁剪窗口，否则逐帧居中会把位移压成原地摆动）"
 }
