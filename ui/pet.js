@@ -50,9 +50,51 @@
   let pack = null;            // { name, base, anims: {state: {frames:[Image], fps, loop}} }
   let player = null;          // 当前播放器 { state, timer, idx }
 
+  /* manifest 读取（2026-09-23 重构）
+   * 主路径：<script src> 加载 manifest.js。
+   *   原因：WKWebView 下页面自身所在的自定义协议（tauri://）不支持 fetch/XHR，
+   *   实测连 fetch("index.html") 都抛 TypeError: Load failed；而 <script>/<img>
+   *   这类子资源加载是正常的。manifest.json 仍是唯一数据源，manifest.js 由
+   *   assets/gen_pack_js.py 生成。
+   * 回退：fetch manifest.json（开发环境 / 支持 fetch 的运行时）。 */
+  function loadScriptManifest(packName, base) {
+    return new Promise((resolve, reject) => {
+      if (window.__PETPOM_PACKS__ && window.__PETPOM_PACKS__[packName]) {
+        resolve(window.__PETPOM_PACKS__[packName]);
+        return;
+      }
+      const s = document.createElement("script");
+      s.src = base + "/manifest.js";
+      s.onload = () => {
+        const m = window.__PETPOM_PACKS__ && window.__PETPOM_PACKS__[packName];
+        m ? resolve(m) : reject(new Error("manifest.js 已加载但无该形象数据"));
+      };
+      s.onerror = () => reject(new Error("manifest.js 加载失败"));
+      document.head.appendChild(s);
+    });
+  }
+
+  async function fetchManifest(packName, base) {
+    try {
+      return await loadScriptManifest(packName, base);
+    } catch (e1) {
+      try {
+        const r = await fetch(base + "/manifest.json");
+        if (r.ok) return await r.json();
+        throw new Error("HTTP " + r.status);
+      } catch (e2) {
+        invoke("frontend_error", {
+          msg: "manifest 读取失败: script=" + String(e1) + " fetch=" + String(e2) +
+            " | href=" + location.href,
+        }).catch(() => {});
+        throw e2;
+      }
+    }
+  }
+
   async function loadPack(name) {
     const base = PACKS[name] || PACKS.shiba;
-    const manifest = await (await fetch(base + "/manifest.json")).json();
+    const manifest = await fetchManifest(name, base);
     const anims = {};
     // manifest.anims: { 动画名: 帧数 }；旧包没有该字段则按 10 帧加载六个基础动画
     const list = manifest.anims || { walk: 10, pet: 10, sleep: 10, alert: 10, happy: 10, sad: 10 };
@@ -84,6 +126,14 @@
     }
     // motion：程序补间映射（关键姿势之间的连续运动由 CSS 层驱动）
     pack = { name, base, anims, realIdle: !!manifest.anims, motion: manifest.motion || null };
+    // 帧图加载哨兵：图片 404 时没有任何显式报错，只表现为「宠物不显示」，必须留痕
+    const probeFrame = anims.idle && anims.idle.frames[0];
+    if (probeFrame) {
+      probeFrame.addEventListener("error", () => {
+        invoke("frontend_error", { msg: "frame load fail: " + name + " " + probeFrame.src })
+          .catch(() => {});
+      });
+    }
     play("idle"); // 默认待机
   }
 
