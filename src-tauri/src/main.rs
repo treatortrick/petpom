@@ -12,9 +12,13 @@ use tauri::menu::{MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{PhysicalPosition, AppHandle, Emitter, LogicalSize, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry};
 
-const PET_SIZE: (f64, f64) = (255.0, 315.0);
+// 2026-09-30：窗口从 315 压到 235（气泡/时间牌下移贴身，顶部空白不再浪费）
+const PET_SIZE: (f64, f64) = (255.0, 235.0);
 const ALERT_SIZE: (f64, f64) = (765.0, 420.0);
-const ALERT_GROW: f64 = ALERT_SIZE.0 - PET_SIZE.0; // 左扩，保持右缘不动
+/// 宠物在窗口里的定位（与 index.html 的 #pet 一致）：左内边距、底内边距、画布边长。
+const PET_LEFT_CSS: f64 = 18.0;
+const PET_BOTTOM_CSS: f64 = 21.0;
+const PET_BOX_CSS: f64 = 192.0;
 
 #[derive(Clone, Serialize)]
 struct Settings {
@@ -40,6 +44,8 @@ struct Settings {
     /// 最近一次「每日首次」送鱼日期（YYYY-MM-DD）。只做惊喜，不做断签惩罚：
     /// 漏一天就是少一条鱼，没有连续奖励、没有补签、没有损失。
     last_gift_date: String,
+    /// 窗口几何版本：窗口尺寸变化时用它做一次性位置迁移（见 startup 迁移块）
+    geom_v: String,
 }
 
 impl Default for Settings {
@@ -59,6 +65,7 @@ impl Default for Settings {
             pet_x: -1.0,
             pet_y: -1.0,
             last_gift_date: String::new(),
+            geom_v: String::new(),
         }
     }
 }
@@ -86,6 +93,7 @@ impl Settings {
         from_db("pet_xp", &mut |v| s.pet_x = v.parse().unwrap_or(s.pet_x));
         from_db("pet_yp", &mut |v| s.pet_y = v.parse().unwrap_or(s.pet_y));
         from_db("last_gift_date", &mut |v| s.last_gift_date = v.to_string());
+        from_db("geom_v", &mut |v| s.geom_v = v.to_string());
         s
     }
 
@@ -105,6 +113,7 @@ impl Settings {
             "pet_xp" => self.pet_x.to_string(),
             "pet_yp" => self.pet_y.to_string(),
             "last_gift_date" => self.last_gift_date.clone(),
+            "geom_v" => self.geom_v.clone(),
             // 2026-09-30：未知键必须留痕。此前是静默 return——改坐标存储键时漏改两处调用，
             // 位置根本没落库却毫无报错（排查成本极高）。
             other => {
@@ -288,10 +297,17 @@ fn show_alert_ui(app: &AppHandle, kind: &str, limited: bool) {
         let _ = w.show(); // 隐藏态也要弹现提醒（interaction-spec 红线）
         let _ = w.set_size(LogicalSize::new(ALERT_SIZE.0, ALERT_SIZE.1));
         // 左扩 + 上移：尺寸/位移是逻辑值，窗口坐标是物理值 → 乘 scale 换算
+        // 提醒态窗口锚点：让「宠物」在两套窗口尺寸下屏幕位置不变。
+        // 水平：放宽后宠物画在窗口右侧（index.html 的 #stage.alerting #pet），
+        //       所以左移 PET_SIZE+PET_LEFT*2 的差值；垂直：底边对齐由高度差决定。
         let sc = w.scale_factor().unwrap_or(1.0);
+        let alert_dx = PET_LEFT_CSS - (ALERT_SIZE.0 - PET_LEFT_CSS - PET_BOX_CSS);
+        let pet_top_in_pet_win = PET_SIZE.1 - PET_BOTTOM_CSS - PET_BOX_CSS;
+        let pet_top_in_alert_win = ALERT_SIZE.1 - PET_BOTTOM_CSS - PET_BOX_CSS;
+        let alert_dy = pet_top_in_pet_win - pet_top_in_alert_win;
         let _ = w.set_position(PhysicalPosition::new(
-            settings.pet_x - ALERT_GROW * sc,
-            settings.pet_y - 40.0 * sc,
+            settings.pet_x + alert_dx * sc,
+            settings.pet_y + alert_dy * sc,
         ));
     }
     state.alerting.store(true, Ordering::SeqCst);
@@ -1142,6 +1158,20 @@ fn main() {
                 let (mut x, mut y) = (settings.pet_x, settings.pet_y);
                 // 屏幕外脏数据自愈：位置不在任何显示器逻辑范围内则回右下角
                 let scale = w.scale_factor().unwrap_or(1.0);
+                // 一次性几何迁移：窗口高度 315 → 235 时，宠物（贴窗口底边）会上跳 80px，
+                // 把 y 补回相同的差值，让宠物待在原地。用 geom_v 保证只做一次。
+                {
+                    let mut s = settings.clone();
+                    const GEOM_V: &str = "235";
+                    if s.geom_v != GEOM_V {
+                        if settings.pet_x != -1.0 || settings.pet_y != -1.0 {
+                            y += 315.0 - PET_SIZE.1; // 视窗变矮了多少，就往下补多少
+                            eprintln!("[petpom] 几何迁移 315→235：y 下移 {:.0}px 保持宠物位置", 315.0 - PET_SIZE.1);
+                        }
+                        s.geom_v = GEOM_V.to_string();
+                        s.save_key(&db, "geom_v");
+                    }
+                }
                 // 屏幕外脏数据自愈：物理坐标直接和显示器的物理范围比，不做任何 scale 折算
                 if x != -1.0 || y != -1.0 {
                     let visible = handle.available_monitors().map(|ms| {

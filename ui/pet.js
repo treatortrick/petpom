@@ -229,6 +229,7 @@
     syncDuck(); // 气泡出现时时间牌避让
     bubbleEl.textContent = text;
     bubbleEl.classList.add("show");
+    bubbleEl.classList.toggle("up", badgeEl.classList.contains("on"));
     clearTimeout(bubbleTimer);
     if (ms > 0) bubbleTimer = setTimeout(() => {
       bubbleEl.classList.remove("show");
@@ -642,11 +643,14 @@
     // 第 3 档指引期间强制显示：气泡避让与每秒刷新都不该把牌藏掉
     const forceOn = Date.now() < badgeHintUntil;
     badgeEl.classList.toggle("on", forceOn || !bubbleEl.classList.contains("show"));
+    badgeEl.classList.toggle("run", !paused);   // 圆点呼吸（暂停时静止）
     badgeEl.classList.toggle("rest", phase === "rest");
     badgeEl.classList.toggle("paused", paused);
     badgeEl.classList.toggle("urgent", !paused && phase === "focus" && remain <= 60);
     badgeLabel.textContent = phase === "rest" ? "休息中" : (paused ? "已暂停" : "专注中");
     badgeTime.textContent = fmtMMSS(remain);
+    // 时间牌可见时气泡上移让位（两者同轴在宠物头顶，否则会叠在一起）
+    bubbleEl.classList.toggle("up", badgeEl.classList.contains("on"));
   }
   /* 避让改为「由当前可见元素推导」而不是计数：
      2026-09-23 修复——气泡与结算卡同时出现时，先结束的那个会 badgeDuck(false)，
@@ -745,11 +749,13 @@
       // 双保险：提醒到点时宠物必须在场（它若正在外面，Rust 已让它赶回来，
       // 这里再强制解除隐身，避免任何竞态导致"窗口弹了但宠物看不见"）
       if (petAway) setAway(false);
+      stageEl.classList.add("alerting"); // 放大窗口布局：宠物定位到右侧（见 index.html）
       setSteady("idle");
       showAlert(e.payload);
       pillEl.classList.add("show");
     });
     await listen("alert/hide", () => {
+      stageEl.classList.remove("alerting");
       if (alerting) hideAlert(false);
     });
     await listen("pet/toast", (e) => toast(e.payload.text));

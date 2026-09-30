@@ -29,7 +29,7 @@
 
   /* 探险带回的卡片（P：温和期待型的核心反馈时刻）
      出现在宠物上方，约 7 秒淡出；期间时间牌避让 */
-  #card-pop { position:absolute; left:50%; top:8px; width:230px; padding:11px 13px 12px;
+  #card-pop { position:absolute; left:114px; top:2px; width:228px; padding:8px 11px 9px;
               background:rgba(255,253,247,.97); border:1px solid #f0e6d2; border-radius:13px;
               box-shadow:0 8px 22px rgba(90,70,40,.14);
               opacity:0; transform:translateX(-50%) translateY(-8px) scale(.97);
@@ -49,6 +49,13 @@
   #pet.away { opacity:0; }
   @media (prefers-reduced-motion: reduce) { #pet { transition:none; } }
 
+  /* 提醒态：窗口向左扩（右缘对齐），宠物固定在大窗口右侧，
+     这样「弹提醒」时宠物不会横跳（765-18-192=555）。 */
+  #stage.alerting #pet { left:555px; }
+  #stage.alerting #bubble { left:651px; }
+  #stage.alerting #card-pop { left:651px; }
+  #stage.alerting #timer-badge { display:none; }
+
   /* ===== 程序补间动作（幅度克制，避免与帧动画打架） ===== */
   @keyframes mBreath { 0%,100% { transform:scale(1,1) translateY(0); } 50% { transform:scale(1.008,1.022) translateY(0); } }
   @keyframes mDoze   { 0%,100% { transform:scale(1,1); } 50% { transform:scale(1.012,1.035); } }
@@ -65,15 +72,20 @@
   .m-press  { animation:mPress .5s ease-out 1; }
 
   /* ===== 气泡 ===== */
-  #bubble { position:absolute; left:24px; bottom:225px; max-width:250px;
-            background:#fff; border:1px solid #e8e0d2; border-radius:12px 12px 12px 3px;
+  #bubble { position:absolute; left:114px; bottom:153px; max-width:232px;
+            background:rgba(255,253,247,.97); border:1px solid #ece0cd; border-radius:14px;
             padding:7px 12px; font-size:13px; color:#6b6357; line-height:1.55;
-            box-shadow:0 4px 14px rgba(60,50,30,.14); opacity:0; transform:translateY(6px);
+            box-shadow:0 4px 14px rgba(60,50,30,.13); opacity:0;
+            transform:translateX(-50%) translateY(6px);
             transition:opacity .18s ease, transform .18s ease; pointer-events:none; }
-  #bubble.show { opacity:1; transform:translateY(0); }
-  #bubble::after { content:""; position:absolute; left:16px; bottom:-6px; width:10px; height:10px;
-            background:#fff; border-right:1px solid #e8e0d2; border-bottom:1px solid #e8e0d2;
-            transform:rotate(45deg); }
+  #bubble.show { opacity:1; transform:translateX(-50%) translateY(0); }
+  /* 尾巴：底部中线指向宠物头顶（气泡与宠物同轴在 x=114，所以尾巴天然对准头顶） */
+  #bubble::after { content:""; position:absolute; left:50%; bottom:-6px; margin-left:-5px;
+                   width:10px; height:10px; background:rgba(255,253,247,.97);
+                   border-right:1px solid #ece0cd; border-bottom:1px solid #ece0cd;
+                   transform:rotate(45deg); }
+  /* 时间牌可见时气泡上移让位（两者不抢同一块空间） */
+  #bubble.up { bottom:181px; }
 
   /* ===== 提醒胶囊 ===== */
   #pill { position:absolute; right:15px; bottom:21px; width:330px;
@@ -110,22 +122,35 @@
            opacity:0; transition:opacity .25s; pointer-events:none; white-space:nowrap; }
   #toast.show { opacity:1; }
 
-  /* ===== 头顶时间牌（专注/休息倒计时，ambient 原则：颜色稳、不加动画） =====
-     四态：专注=暖橙（与提醒胶囊主按钮同色）/休息=青绿/暂停=灰（数字静止）/空闲=隐藏；
-     最后 60 秒专注转红（与托盘 urgent 同一阈值）；气泡出现时整牌避让隐藏。 */
-  #timer-badge { position:absolute; bottom:216px; left:50%; transform:translateX(-50%) translateY(4px);
-           display:flex; align-items:center; gap:7px; padding:5px 14px; border-radius:999px;
-           background:#e8975a; color:#fff; box-shadow:0 4px 12px rgba(60,50,30,.16);
+  /* ===== 头顶时间牌（2026-09-30 改版）=====
+     改成「米白细描边挂件 + 状态圆点」，并下移到紧贴宠物头顶上方 10px（宠物中心 x=114）。
+     状态语义：专注=橙色呼吸点 / 休息=青绿点 / 暂停=灰点不动 / 最后 60 秒=红点快闪。
+     旧版是整块高饱和橙色实心胶囊——视觉权重比宠物还大，且离头顶 73px，像另一个东西。 */
+  #timer-badge { position:absolute; bottom:153px; left:114px;
+           transform:translateX(-50%) translateY(4px);
+           display:flex; align-items:center; gap:7px; padding:4px 12px 4px 10px;
+           border-radius:999px; background:rgba(255,253,247,.97);
+           border:1px solid #ece0cd; color:#5f584d;
+           box-shadow:0 3px 10px rgba(70,55,35,.10);
            opacity:0; pointer-events:none; white-space:nowrap; cursor:pointer;
-           transition:opacity .22s ease, transform .22s ease, background-color .35s ease;
-           font-variant-numeric:tabular-nums; }
+           transition:opacity .22s ease, transform .22s ease; }
   #timer-badge.on { opacity:1; transform:translateX(-50%) translateY(0); pointer-events:auto; }
   #timer-badge.duck { opacity:0; transform:translateX(-50%) translateY(4px); pointer-events:none; }
-  #timer-badge .t-label { font-size:10.5px; font-weight:500; opacity:.88; }
-  #timer-badge .t-time { font-size:13.5px; font-weight:700; letter-spacing:.5px; }
-  #timer-badge.rest { background:#6fb5a0; }
-  #timer-badge.paused { background:#b3aa9c; }
-  #timer-badge.urgent { background:#d9534f; }
+  #timer-badge .dot { width:6px; height:6px; border-radius:50%; background:#e8975a; flex:0 0 auto; }
+  #timer-badge .t-label { font-size:11px; color:#a0968a; }
+  #timer-badge .t-time { font-size:12.5px; font-weight:500; color:#4a4238;
+                         font-variant-numeric:tabular-nums; letter-spacing:.3px; }
+  @keyframes badgeDot {
+    0%,100% { opacity:1; transform:scale(1); }
+    50%     { opacity:.4; transform:scale(.8); }
+  }
+  #timer-badge.run .dot { animation:badgeDot 2s ease-in-out infinite; }
+  #timer-badge.rest .dot { background:#6fb5a0; }
+  #timer-badge.paused .dot { background:#b3aa9c; }
+  #timer-badge.paused .t-time { color:#8d857a; }
+  #timer-badge.urgent .dot { background:#d9534f; animation-duration:.9s; }
+  #timer-badge.urgent .t-time { color:#c0392b; }
+
   /* 开小差第 3 档：时间牌闪三下 + 轻微放大，把「暂停」出口指出来。
      注意：必须同时覆盖 .duck 的隐藏（气泡出现时牌会避让），否则闪了也看不见 */
   @keyframes badgeHint {
@@ -156,6 +181,7 @@
   @media (prefers-reduced-motion: reduce) {
     #pet .motion { animation:none !important; }
     #timer-badge.hint { animation:none; }
+    #timer-badge .dot { animation:none !important; }
     .zzz { display:none; }
     #timer-badge, #bubble, #pill, #settle, #card-pop, #pet .anim { transition:none; }
   }
@@ -165,7 +191,7 @@
 <div id="stage">
   <div id="settle"></div>
   <div id="card-pop"></div>
-  <div id="timer-badge"><span class="t-label">专注中</span><span class="t-time">00:00</span></div>
+  <div id="timer-badge"><span class="dot"></span><span class="t-label">专注中</span><span class="t-time">00:00</span></div>
   <div id="bubble"></div>
   <div id="pet"><div class="motion"></div></div>
   <div id="pill">
