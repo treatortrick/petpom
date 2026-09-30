@@ -141,6 +141,9 @@ struct AppState {
     react_final: AtomicBool,
     /// 本轮专注中被点击（开小差）的次数：进入新一轮专注时清零，结算时读取
     distractions: std::sync::atomic::AtomicU64,
+    /// 拖拽期间的权威位置（物理像素）。拖动只累加这里，不每帧回读窗口位置——
+    /// IPC + set_position 是异步的，回读到的是上一帧旧值，会把位移吃掉（表现为拖不动/卡住）
+    drag_pos: Mutex<Option<(f64, f64)>>,
 }
 
 // ---------- 宠物命名 / 文案 ----------
@@ -203,19 +206,34 @@ fn pet_window(app: &AppHandle) -> Option<WebviewWindow<Wry>> {
 /// 手动拖拽：前端按指针位移算出新窗口坐标发过来，这里直接落位。
 /// 不用系统的 startDragging —— macOS 上它在 pointermove 里调用会有
 /// 陈旧 mouseDown 锚点 / 拖拽会话吞掉 mouseup 的问题（只能拖一次/拖不远）。
+/// 起拖：读一次真实窗口位置作为累加基准（只在拖拽开始时读，之后不再回读）
+#[tauri::command]
+fn drag_begin(app: AppHandle, state: tauri::State<AppState>) {
+    if let Some(w) = pet_window(&app) {
+        if let Ok(p) = w.outer_position() {
+            *state.drag_pos.lock().unwrap() = Some((p.x as f64, p.y as f64));
+        }
+    }
+}
+
+/// 结束拖拽：清理累加器（位置由 window Moved 事件落库）
+#[tauri::command]
+fn drag_end(state: tauri::State<AppState>) {
+    *state.drag_pos.lock().unwrap() = None;
+}
+
 /// 增量拖动：按**物理像素**增量移动窗口。
 /// 为什么不用绝对坐标：LogicalPosition 会按窗口当前所在的屏折算 scale，
 /// 跨屏时 scale 变化会让同一个逻辑坐标指向不同物理点 → 表现为拖到副屏就“卡住/乱跳”。
 /// 增量 + 物理坐标全程不涉及 scale，天然多屏安全。
 #[tauri::command]
-fn drag_move_by(app: AppHandle, dx: f64, dy: f64) {
+fn drag_move_by(app: AppHandle, state: tauri::State<AppState>, dx: f64, dy: f64) {
+    let mut g = state.drag_pos.lock().unwrap();
+    let Some((x, y)) = *g else { return }; // 未 begin：忽略（前端会补 begin）
+    let (nx, ny) = (x + dx, y + dy);
+    *g = Some((nx, ny));
     if let Some(w) = pet_window(&app) {
-        if let Ok(pos) = w.outer_position() {
-            let _ = w.set_position(PhysicalPosition::new(
-                pos.x as f64 + dx,
-                pos.y as f64 + dy,
-            ));
-        }
+        let _ = w.set_position(PhysicalPosition::new(nx, ny));
     }
 }
 
@@ -1261,6 +1279,7 @@ fn main() {
                 react_half: AtomicBool::new(false),
                 react_final: AtomicBool::new(false),
                 distractions: std::sync::atomic::AtomicU64::new(0),
+                drag_pos: Mutex::new(None),
             });
 
             build_tray(&h2)?;
@@ -1305,7 +1324,9 @@ fn main() {
             mark_den_seen,
             get_current_pack,
             set_settings,
+            drag_begin,
             drag_move_by,
+            drag_end,
             pause_resume,
             alert_rest,
             alert_snooze,

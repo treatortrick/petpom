@@ -339,6 +339,8 @@
   let facing = 0;          // 拖拽朝向：-1 左(基准), 1 右(镜像)；0=未拖拽
   let rafPending = false;
   let pendingMove = null;  // 待发送的物理像素增量
+  let dragArmed = false;   // drag_begin 是否已就绪
+  let lastDpr = 1;         // 上一帧的 devicePixelRatio（跨屏检测）
   const stageEl = document.getElementById("stage");
 
   // 帧基准朝向=左；向右拖拽时水平镜像（manifest: walk 帧朝向=left）
@@ -383,17 +385,33 @@
       if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
       dragging = true;
       lastScreen = { x: e.screenX, y: e.screenY }; // 从判定点起算，避免起手跳一下
+      lastDpr = window.devicePixelRatio || 1;
+      // 让 Rust 侧读一次真实窗口位置作为累加基准（之后不再回读，避免异步回读吃掉位移）
+      dragArmed = false;
+      invoke("drag_begin").then(() => { dragArmed = true; }).catch(() => { dragArmed = true; });
       play("walk"); // 被拎着走
     }
     if (!lastScreen) return;
-    // 2026-09-30：改成「物理像素增量」。跨屏时 devicePixelRatio 会变，
-    // 但每次事件都按当时的 dpr 换算，累加结果始终正确；
-    // 不再把「逻辑窗口坐标 + 逻辑位移」混算（那是拖到副屏失败的根因）。
     const dpr = window.devicePixelRatio || 1;
-    const mvx = e.screenX - lastScreen.x;
-    if (mvx > 4) setFacing(1); else if (mvx < -4) setFacing(-1);
-    queueMoveBy((e.screenX - lastScreen.x) * dpr, (e.screenY - lastScreen.y) * dpr);
+    if (dpr !== lastDpr) {
+      // 2026-09-30：跨屏了。CSS 坐标的表达尺度随屏变化（physical/scale），
+      // 切换那一帧算出来的增量巨大且方向错误，会把窗口顶回原屏 ——
+      // 表现就是「拖到两块屏之间就卡住，过不去」。这里丢弃本帧并重新对齐基准。
+      lastDpr = dpr;
+      lastScreen = { x: e.screenX, y: e.screenY };
+      invoke("drag_begin").catch(() => {});
+      return;
+    }
+    const rdx = (e.screenX - lastScreen.x) * dpr;
+    const rdy = (e.screenY - lastScreen.y) * dpr;
     lastScreen = { x: e.screenX, y: e.screenY };
+    // 异常跳变兜底：跨屏瞬间仍可能产生超大增量，直接丢弃并重新对齐
+    if (Math.abs(rdx) > 600 || Math.abs(rdy) > 600) {
+      invoke("drag_begin").catch(() => {});
+      return;
+    }
+    if (rdx > 4) setFacing(1); else if (rdx < -4) setFacing(-1);
+    queueMoveBy(rdx, rdy);
   });
 
   /* 拖拽位移发送：按**物理像素增量**下发（rAF 节流 + 帧内累加）。
@@ -407,14 +425,17 @@
     rafPending = true;
     requestAnimationFrame(() => {
       rafPending = false;
+      // 未 armed（drag_begin 还没回来）时不发、也不清空，继续累积，armed 后一次送出
+      if (!dragging || !dragArmed) return;
       const d = pendingMove; pendingMove = null;
-      if (d && dragging) invoke("drag_move_by", { dx: d.dx, dy: d.dy }).catch(() => {});
+      if (d) invoke("drag_move_by", { dx: d.dx, dy: d.dy }).catch(() => {});
     });
   }
 
   window.addEventListener("pointerup", () => {
     const wasDrag = dragging;
-    dragging = false; lastScreen = null; pendingMove = null;
+    dragging = false; lastScreen = null; pendingMove = null; dragArmed = false;
+    if (wasDrag) invoke("drag_end").catch(() => {});
     if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
     const start = pressStart;
     pressStart = null;
