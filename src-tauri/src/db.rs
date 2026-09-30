@@ -9,7 +9,13 @@ pub struct Db {
 impl Db {
     pub fn open(path: &Path) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open(path)?;
-        conn.execute_batch(
+        init(&conn)?;
+        Ok(Db { conn: Mutex::new(conn) })
+    }
+}
+
+fn init(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS settings (
                key   TEXT PRIMARY KEY,
@@ -40,9 +46,11 @@ impl Db {
                obtained_at TEXT NOT NULL,
                seen        INTEGER NOT NULL DEFAULT 0
              );",
-        )?;
-        Ok(Db { conn: Mutex::new(conn) })
-    }
+    )?;
+    Ok(())
+}
+
+impl Db {
 
     pub fn get_setting(&self, key: &str) -> Option<String> {
         let conn = self.conn.lock().unwrap();
@@ -174,6 +182,48 @@ impl Db {
         }
     }
 
+    /// 撤销式召回：删掉进行中的探险（等于这趟没发生）。调用方负责退还小鱼干与回退亲密度。
+    pub fn cancel_active_expedition(&self) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(i64, String)> = {
+            let mut st = conn
+                .prepare("SELECT id, card_key FROM expeditions WHERE returned = 0 ORDER BY id DESC LIMIT 1")
+                .ok()?;
+            st.query_row([], |r| Ok((r.get(0)?, r.get(1)?))).optional().ok().flatten()
+        };
+        let (id, key) = row?;
+        let _ = conn.execute("DELETE FROM expeditions WHERE id = ?1", [id]);
+        Some(key)
+    }
+
+    /// 提醒优先：把进行中的探险立刻结算（卡片照给）——专注到点时它必须赶回来。
+    pub fn force_return_active(&self, obtained_at: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(i64, String)> = {
+            let mut st = conn
+                .prepare("SELECT id, card_key FROM expeditions WHERE returned = 0 ORDER BY id DESC LIMIT 1")
+                .ok()?;
+            st.query_row([], |r| Ok((r.get(0)?, r.get(1)?))).optional().ok().flatten()
+        };
+        let (id, key) = row?;
+        let _ = conn.execute(
+            "UPDATE expeditions SET returned = 1, collected = 1 WHERE id = ?1",
+            [id],
+        );
+        let _ = conn.execute(
+            "INSERT INTO cards(card_key, obtained_at) VALUES(?1, ?2)",
+            rusqlite::params![key, obtained_at],
+        );
+        Some(key)
+    }
+
+    /// 进行中的探险数量（测试/调试用）
+    pub fn active_expedition_count(&self) -> i64 {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM expeditions WHERE returned = 0", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
     pub fn mark_den_seen(&self) {
         let conn = self.conn.lock().unwrap();
         let _ = conn.execute("UPDATE cards SET seen = 1 WHERE seen = 0", []);
@@ -183,5 +233,58 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         conn.query_row("SELECT COUNT(*) FROM cards WHERE seen = 0", [], |r| r.get(0))
             .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem() -> Db {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        Db { conn: Mutex::new(conn) }
+    }
+
+    #[test]
+    fn 出发可查_到点才结算_进小窝且未读() {
+        let db = mem();
+        db.start_expedition("2026-09-23 10:00:00", 1000, "clover");
+        assert_eq!(db.active_expedition().unwrap().2, "clover");
+        assert_eq!(db.active_expedition_count(), 1);
+        assert!(db.due_expeditions(999).is_empty(), "未到点不该结算");
+        assert_eq!(db.due_expeditions(1000).len(), 1, "到点应可结算");
+        db.return_expedition(1, "clover", "2026-09-23 10:20:00");
+        assert_eq!(db.active_expedition_count(), 0);
+        assert_eq!(db.den_cards().len(), 1);
+        assert_eq!(db.unseen_count(), 1);
+    }
+
+    #[test]
+    fn 撤销式召回_删行程且不留卡片() {
+        let db = mem();
+        db.start_expedition("2026-09-23 10:00:00", 99999, "seaglass");
+        assert_eq!(db.cancel_active_expedition().unwrap(), "seaglass");
+        assert_eq!(db.active_expedition_count(), 0);
+        assert_eq!(db.den_cards().len(), 0, "撤销不该留下卡片");
+        assert!(db.due_expeditions(999999).is_empty());
+    }
+
+    #[test]
+    fn 提醒优先_强制回来要把卡片带回来() {
+        let db = mem();
+        db.start_expedition("2026-09-23 10:00:00", 99999, "rainbow");
+        assert_eq!(db.force_return_active("2026-09-23 10:05:00").unwrap(), "rainbow");
+        assert_eq!(db.active_expedition_count(), 0);
+        let cards = db.den_cards();
+        assert_eq!(cards.len(), 1, "赶回来也要给卡片");
+        assert_eq!(cards[0].0, "rainbow");
+    }
+
+    #[test]
+    fn 没有行程时_两个操作都安全返回None() {
+        let db = mem();
+        assert!(db.cancel_active_expedition().is_none());
+        assert!(db.force_return_active("x").is_none());
     }
 }

@@ -230,6 +230,24 @@ fn open_settings(app: &AppHandle) -> tauri::Result<()> {
 fn show_alert_ui(app: &AppHandle, kind: &str, limited: bool) {
     let Some(state) = app.try_state::<AppState>() else { return };
     let settings = state.settings.lock().unwrap().clone();
+    // 提醒优先（interaction-spec 红线「提醒到点强制弹现」）：
+    // 它若正在外面，必须赶回来——否则窗口弹了、宠物却还隐身着，提醒变成没有主角。
+    // 行程保留、卡片照给（守住专注是它的职责，优先级高于这趟探索）。
+    {
+        let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        if let Some(key) = state.db.force_return_active(&stamp) {
+            if let Some(card) = card_by_key(&key) {
+                let _ = app.emit(
+                    "pet/card",
+                    serde_json::json!({
+                        "key": card.key, "name": card.name, "text": card.text,
+                        "rarity": card.rarity, "rarity_label": RARITY_LABEL[card.rarity as usize],
+                        "startup": false, "rushed": true,
+                    }),
+                );
+            }
+        }
+    }
     if let Some(w) = pet_window(app) {
         let _ = w.show(); // 隐藏态也要弹现提醒（interaction-spec 红线）
         let _ = w.set_size(LogicalSize::new(ALERT_SIZE.0, ALERT_SIZE.1));
@@ -362,6 +380,29 @@ fn settle_due_expeditions(app: &AppHandle, startup: bool) {
     rebuild_tray_later(app);
 }
 
+/// 撤销式召回：把出门的宠物叫回来（2026-09-23 队长决定）。
+/// 这趟作废——退还小鱼干、回退亲密度、没有卡片。
+/// 敢给这个出口的原因：提前召回拿不到卡片，所以没人会用它绕过等待，
+/// 「有出口」和「有时间门槛」可以同时成立。
+fn recall_expedition_internal(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.db.cancel_active_expedition().is_none() {
+        say(app, "它就在家呀～", 3000);
+        return;
+    }
+    {
+        let mut s = state.settings.lock().unwrap();
+        s.snacks = (s.snacks + 1).min(9);
+        s.bond = (s.bond - 1).max(0);
+        s.save_key(&state.db, "snacks");
+        s.save_key(&state.db, "bond");
+    }
+    let s = state.settings.lock().unwrap().clone();
+    let _ = app.emit("pet/recall", serde_json::json!({}));
+    say(app, &named("我先回来啦…这趟什么都没找到，小鱼干还你～", &s), 4500);
+    rebuild_tray_later(app);
+}
+
 /// 每天第一次打开时送一条小鱼干。纯惊喜，不做连续奖励、不惩罚漏签。
 fn daily_first_gift(app: &AppHandle) {
     let state = app.state::<AppState>();
@@ -470,12 +511,20 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         )
     };
 
-    let feed = tauri::menu::MenuItemBuilder::with_id(
-        "feed",
-        format!("投喂 · 小鱼干 ×{}", s.snacks),
-    )
-    .enabled(s.snacks > 0 && !matches!(phase.as_str(), "alert-focus" | "alert-rest"))
-    .build(app)?;
+    // 投喂项：与右键菜单同源。2026-09-23 起不再灰掉——没鱼/已出门时点它都会得到明确解释
+    let trip_left = state
+        .db
+        .active_expedition()
+        .filter(|(_, due, _, _)| *due > chrono::Local::now().timestamp())
+        .map(|(_, due, _, _)| ((due - chrono::Local::now().timestamp() + 59) / 60).max(1));
+    let feed_label = match trip_left {
+        Some(m) => format!("它出门中 · 约 {} 分钟后回来", m),
+        None => format!("投喂小鱼干 · 还有 ×{}", s.snacks),
+    };
+    let feed = tauri::menu::MenuItemBuilder::with_id("feed", feed_label).build(app)?;
+    let recall = tauri::menu::MenuItemBuilder::with_id("recall", "叫它回来")
+        .enabled(trip_left.is_some())
+        .build(app)?;
     // 今日战绩行（不可点，纯信息）：与结算卡同源
     let (today_rounds, today_min) = state.db.stats_today();
     let stats_line = tauri::menu::MenuItemBuilder::with_id(
@@ -509,6 +558,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     if let Some(sk) = &skip { items.push(sk); }
     items.push(&sep_b);
     items.push(&feed);
+    items.push(&recall);
     items.push(&show_pet);
     items.push(&sep_c);
     items.push(&clickthrough);
@@ -564,6 +614,7 @@ fn on_menu_action(app: &AppHandle, id: &str) {
             let _ = state.timer.0.send(timer::Cmd::Skip);
         }
         "feed" => feed_pet_internal(app),
+        "recall" => recall_expedition_internal(app),
         "show_pet" => {
             let hide = state.hidden.load(Ordering::SeqCst); // 勾选=显示 → 取消隐藏
             set_pet_hidden(app, !hide);
@@ -664,8 +715,11 @@ fn feed_pet_internal(app: &AppHandle) {
     let _ = app.emit("pet/state", serde_json::json!({ "state": "eat" }));
     say(
         app,
-        &named("（吧唧吧唧）我去去就回，等我带点好东西回来！", &s),
-        4200,
+        &named(
+            &format!("（吧唧吧唧）我出去转转，大约 {} 分钟后回来，等我带点好东西！", mins),
+            &s,
+        ),
+        4500,
     );
     rebuild_tray_later(app);
 }
@@ -953,6 +1007,9 @@ fn build_context_menu(
         None => format!("投喂小鱼干 · 还有 ×{}", s.snacks),
     };
     let feed = tauri::menu::MenuItemBuilder::with_id("feed", feed_label).build(app)?;
+    let recall = tauri::menu::MenuItemBuilder::with_id("recall", "叫它回来")
+        .enabled(trip_left.is_some())
+        .build(app)?;
     let unseen = st.db.unseen_count();
     let settings_label = if unseen > 0 {
         format!("设置…（小窝有 {} 件新东西）", unseen)
@@ -972,6 +1029,7 @@ fn build_context_menu(
     }
     if !alerting {
         items.push(&feed);
+        items.push(&recall);
     }
     items.push(&sep2);
     items.push(&settings_item);

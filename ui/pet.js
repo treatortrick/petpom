@@ -717,6 +717,9 @@
     });
     await listen("alert/show", (e) => {
       pillLimited = !!e.payload.limited;
+      // 双保险：提醒到点时宠物必须在场（它若正在外面，Rust 已让它赶回来，
+      // 这里再强制解除隐身，避免任何竞态导致"窗口弹了但宠物看不见"）
+      if (petAway) setAway(false);
       setSteady("idle");
       showAlert(e.payload);
       pillEl.classList.add("show");
@@ -738,6 +741,10 @@
     });
     await listen("stats/settle", (e) => showSettle(e.payload));
     await listen("pet/card", (e) => onCardReturn(e.payload));
+    // 撤销式召回：它空手回来（Rust 已退还小鱼干/回退亲密度，气泡由 Rust 发）
+    await listen("pet/recall", () => {
+      comeBack(() => play(lastSteadyState));
+    });
 
     try {
       const packName = await invoke("get_current_pack");
