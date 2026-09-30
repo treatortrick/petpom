@@ -217,13 +217,6 @@ impl Db {
         Some(key)
     }
 
-    /// 进行中的探险数量（测试/调试用）
-    pub fn active_expedition_count(&self) -> i64 {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT COUNT(*) FROM expeditions WHERE returned = 0", [], |r| r.get(0))
-            .unwrap_or(0)
-    }
-
     pub fn mark_den_seen(&self) {
         let conn = self.conn.lock().unwrap();
         let _ = conn.execute("UPDATE cards SET seen = 1 WHERE seen = 0", []);
@@ -251,11 +244,11 @@ mod tests {
         let db = mem();
         db.start_expedition("2026-09-23 10:00:00", 1000, "clover");
         assert_eq!(db.active_expedition().unwrap().2, "clover");
-        assert_eq!(db.active_expedition_count(), 1);
+        assert!(db.active_expedition().is_some());
         assert!(db.due_expeditions(999).is_empty(), "未到点不该结算");
         assert_eq!(db.due_expeditions(1000).len(), 1, "到点应可结算");
         db.return_expedition(1, "clover", "2026-09-23 10:20:00");
-        assert_eq!(db.active_expedition_count(), 0);
+        assert!(db.active_expedition().is_none());
         assert_eq!(db.den_cards().len(), 1);
         assert_eq!(db.unseen_count(), 1);
     }
@@ -265,7 +258,7 @@ mod tests {
         let db = mem();
         db.start_expedition("2026-09-23 10:00:00", 99999, "seaglass");
         assert_eq!(db.cancel_active_expedition().unwrap(), "seaglass");
-        assert_eq!(db.active_expedition_count(), 0);
+        assert!(db.active_expedition().is_none());
         assert_eq!(db.den_cards().len(), 0, "撤销不该留下卡片");
         assert!(db.due_expeditions(999999).is_empty());
     }
@@ -275,7 +268,7 @@ mod tests {
         let db = mem();
         db.start_expedition("2026-09-23 10:00:00", 99999, "rainbow");
         assert_eq!(db.force_return_active("2026-09-23 10:05:00").unwrap(), "rainbow");
-        assert_eq!(db.active_expedition_count(), 0);
+        assert!(db.active_expedition().is_none());
         let cards = db.den_cards();
         assert_eq!(cards.len(), 1, "赶回来也要给卡片");
         assert_eq!(cards[0].0, "rainbow");

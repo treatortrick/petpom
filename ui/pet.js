@@ -334,11 +334,11 @@
    */
   let pressTimer = null;
   let pressStart = null;   // { t } 按下时间
-  let dragBase = null;     // { wx, wy, sx, sy } 窗口逻辑坐标 + 指针屏幕坐标锚点
+  let lastScreen = null;   // 拖拽上一帧的指针屏幕坐标（CSS px，用于算增量）
   let dragging = false;
   let facing = 0;          // 拖拽朝向：-1 左(基准), 1 右(镜像)；0=未拖拽
   let rafPending = false;
-  let pendingPos = null;
+  let pendingMove = null;  // 待发送的物理像素增量
   const stageEl = document.getElementById("stage");
 
   // 帧基准朝向=左；向右拖拽时水平镜像（manifest: walk 帧朝向=left）
@@ -363,70 +363,58 @@
     if (e.target.closest("#pill") || e.target.closest("#timer-badge")) return; // 胶囊/时间牌点击不当作抚摸/拖拽
     e.preventDefault(); // 防 webview 原生图片拖拽/文本选中干扰
     try { stageEl.setPointerCapture(e.pointerId); } catch (_) {}
-    // 按下点必须同步记下（阈值判断依赖它，不能等异步的窗口位置）
+    // 按下点：同步记录（阈值判断用），拖拽全程只用增量、不需要窗口绝对坐标
     pressStart = { t: Date.now(), sx: e.screenX, sy: e.screenY };
     pressTimer = setTimeout(() => {
       pressTimer = null;
       petAction();
     }, 900);
-    // 窗口位置异步补；失败也不影响拖拽（拖拽时会按需再取一次）
-    dragBase = null;
-    const sx0 = e.screenX, sy0 = e.screenY;
-    curWin.outerPosition().then((p) => {
-      const dpr = window.devicePixelRatio || 1;
-      // 仅当还是同一次按下时才采用，避免过期位置套到新的按下上
-      if (pressStart && pressStart.sx === sx0) {
-        dragBase = { wx: p.x / dpr, wy: p.y / dpr, sx: sx0, sy: sy0 };
-      }
-    }).catch(() => {});
+    lastScreen = null;
   });
 
-  stageEl.addEventListener("pointermove", async (e) => {
+  stageEl.addEventListener("pointermove", (e) => {
     if (!pressStart && !dragging) return;
     if (!dragging) {
       if (!pressStart) return;
-      // 阈值用同步的按下点判断（旧代码在锚点未就绪时退化成 dx=0，永远过不了门槛 →
-      // 表现为「第一次拖不动，得再来一次」）
+      // 起拖阈值：用同步的按下点判断（异步量一律不参与阈值）
       const dx = e.screenX - pressStart.sx;
       const dy = e.screenY - pressStart.sy;
       if (dx * dx + dy * dy <= 64) return; // 8px 内不算拖拽（保留单击抚摸）
       if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
-      if (!dragBase) {
-        // 2026-09-30 修复：锚点还没就绪 → 按需补取，而不是放弃本次拖拽。
-        // 快速甩动时首帧往往早于异步窗口位置返回，旧逻辑会白白丢掉这一次拖拽。
-        try {
-          const p = await curWin.outerPosition();
-          const dpr = window.devicePixelRatio || 1;
-          dragBase = { wx: p.x / dpr, wy: p.y / dpr, sx: pressStart.sx, sy: pressStart.sy };
-        } catch (_) { return; }
-      }
-      if (!pressStart) return; // await 期间用户已松手
       dragging = true;
+      lastScreen = { x: e.screenX, y: e.screenY }; // 从判定点起算，避免起手跳一下
       play("walk"); // 被拎着走
     }
-    // 朝向跟随拖拽方向（>4px 才切换，避免抖动）
-    const mvx = e.screenX - dragBase.sx;
+    if (!lastScreen) return;
+    // 2026-09-30：改成「物理像素增量」。跨屏时 devicePixelRatio 会变，
+    // 但每次事件都按当时的 dpr 换算，累加结果始终正确；
+    // 不再把「逻辑窗口坐标 + 逻辑位移」混算（那是拖到副屏失败的根因）。
+    const dpr = window.devicePixelRatio || 1;
+    const mvx = e.screenX - lastScreen.x;
     if (mvx > 4) setFacing(1); else if (mvx < -4) setFacing(-1);
-    queueMove(
-      Math.round(dragBase.wx + (e.screenX - dragBase.sx)),
-      Math.round(dragBase.wy + (e.screenY - dragBase.sy))
-    );
+    queueMoveBy((e.screenX - lastScreen.x) * dpr, (e.screenY - lastScreen.y) * dpr);
+    lastScreen = { x: e.screenX, y: e.screenY };
   });
 
-  function queueMove(x, y) {
-    pendingPos = { x, y };
+  /* 拖拽位移发送：按**物理像素增量**下发（rAF 节流 + 帧内累加）。
+     用增量而非绝对坐标的原因见 pointermove 注释：跨屏时 LogicalPosition
+     会按当前屏 scale 折算，绝对坐标在多显示器下不成立。 */
+  function queueMoveBy(dx, dy) {
+    pendingMove = pendingMove
+      ? { dx: pendingMove.dx + dx, dy: pendingMove.dy + dy }
+      : { dx, dy };
     if (rafPending) return;
     rafPending = true;
     requestAnimationFrame(() => {
       rafPending = false;
-      const p = pendingPos; pendingPos = null;
-      if (p && dragging) invoke("drag_move", { x: p.x, y: p.y }).catch(() => {});
+      const d = pendingMove; pendingMove = null;
+      if (d && dragging) invoke("drag_move_by", { dx: d.dx, dy: d.dy }).catch(() => {});
     });
   }
 
   window.addEventListener("pointerup", () => {
     const wasDrag = dragging;
-    dragging = false; dragBase = null; pendingPos = null;
+    dragging = false; lastScreen = null; pendingMove = null;
     if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
     const start = pressStart;
     pressStart = null;
@@ -440,7 +428,7 @@
   });
 
   window.addEventListener("pointercancel", () => {
-    dragging = false; dragBase = null; pendingPos = null;
+    dragging = false; lastScreen = null; pendingMove = null;
     if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
     pressStart = null;
     setFacing(0);

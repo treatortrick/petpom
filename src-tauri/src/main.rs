@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::menu::{MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry};
+use tauri::{PhysicalPosition, AppHandle, Emitter, LogicalSize, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry};
 
 const PET_SIZE: (f64, f64) = (255.0, 315.0);
 const ALERT_SIZE: (f64, f64) = (765.0, 420.0);
@@ -32,6 +32,9 @@ struct Settings {
     snacks: i64,
     /// 亲密度：累计投喂次数，只增不减、无惩罚（拒绝养成衰减那套）
     bond: i64,
+    /// 窗口位置：**物理像素**（全局坐标系，可有负值——副屏在主屏左侧/上方时为负）。
+    /// 2026-09-30 修复：此前存逻辑像素（按窗口所在屏的 scale 折算），多显示器下
+    /// 同一物理点在不同屏会算出不同的逻辑值 → 拖动跨屏失败、恢复位置错乱。
     pet_x: f64,
     pet_y: f64,
     /// 最近一次「每日首次」送鱼日期（YYYY-MM-DD）。只做惊喜，不做断签惩罚：
@@ -79,8 +82,9 @@ impl Settings {
         from_db("pet_name", &mut |v| s.pet_name = v.to_string());
         from_db("snacks", &mut |v| s.snacks = v.parse().unwrap_or(s.snacks));
         from_db("bond", &mut |v| s.bond = v.parse().unwrap_or(s.bond));
-        from_db("pet_x", &mut |v| s.pet_x = v.parse().unwrap_or(s.pet_x));
-        from_db("pet_y", &mut |v| s.pet_y = v.parse().unwrap_or(s.pet_y));
+        // 2026-09-30 起坐标按「物理像素」存储（见 pet_xp 注释）；旧的逻辑坐标键不再读取
+        from_db("pet_xp", &mut |v| s.pet_x = v.parse().unwrap_or(s.pet_x));
+        from_db("pet_yp", &mut |v| s.pet_y = v.parse().unwrap_or(s.pet_y));
         from_db("last_gift_date", &mut |v| s.last_gift_date = v.to_string());
         s
     }
@@ -98,10 +102,15 @@ impl Settings {
             "pet_name" => self.pet_name.clone(),
             "snacks" => self.snacks.to_string(),
             "bond" => self.bond.to_string(),
-            "pet_x" => self.pet_x.to_string(),
-            "pet_y" => self.pet_y.to_string(),
+            "pet_xp" => self.pet_x.to_string(),
+            "pet_yp" => self.pet_y.to_string(),
             "last_gift_date" => self.last_gift_date.clone(),
-            _ => return,
+            // 2026-09-30：未知键必须留痕。此前是静默 return——改坐标存储键时漏改两处调用，
+            // 位置根本没落库却毫无报错（排查成本极高）。
+            other => {
+                eprintln!("[petpom] save_key 未知键，已忽略: {other}");
+                return;
+            }
         };
         db.set_setting(key, &v);
     }
@@ -194,10 +203,19 @@ fn pet_window(app: &AppHandle) -> Option<WebviewWindow<Wry>> {
 /// 手动拖拽：前端按指针位移算出新窗口坐标发过来，这里直接落位。
 /// 不用系统的 startDragging —— macOS 上它在 pointermove 里调用会有
 /// 陈旧 mouseDown 锚点 / 拖拽会话吞掉 mouseup 的问题（只能拖一次/拖不远）。
+/// 增量拖动：按**物理像素**增量移动窗口。
+/// 为什么不用绝对坐标：LogicalPosition 会按窗口当前所在的屏折算 scale，
+/// 跨屏时 scale 变化会让同一个逻辑坐标指向不同物理点 → 表现为拖到副屏就“卡住/乱跳”。
+/// 增量 + 物理坐标全程不涉及 scale，天然多屏安全。
 #[tauri::command]
-fn drag_move(app: AppHandle, x: f64, y: f64) {
+fn drag_move_by(app: AppHandle, dx: f64, dy: f64) {
     if let Some(w) = pet_window(&app) {
-        let _ = w.set_position(LogicalPosition::new(x, y));
+        if let Ok(pos) = w.outer_position() {
+            let _ = w.set_position(PhysicalPosition::new(
+                pos.x as f64 + dx,
+                pos.y as f64 + dy,
+            ));
+        }
     }
 }
 
@@ -251,9 +269,11 @@ fn show_alert_ui(app: &AppHandle, kind: &str, limited: bool) {
     if let Some(w) = pet_window(app) {
         let _ = w.show(); // 隐藏态也要弹现提醒（interaction-spec 红线）
         let _ = w.set_size(LogicalSize::new(ALERT_SIZE.0, ALERT_SIZE.1));
-        let _ = w.set_position(LogicalPosition::new(
-            settings.pet_x - ALERT_GROW,
-            settings.pet_y - 40.0,
+        // 左扩 + 上移：尺寸/位移是逻辑值，窗口坐标是物理值 → 乘 scale 换算
+        let sc = w.scale_factor().unwrap_or(1.0);
+        let _ = w.set_position(PhysicalPosition::new(
+            settings.pet_x - ALERT_GROW * sc,
+            settings.pet_y - 40.0 * sc,
         ));
     }
     state.alerting.store(true, Ordering::SeqCst);
@@ -275,7 +295,7 @@ fn hide_alert_ui(app: &AppHandle, pet_state: &str) {
     let settings = state.settings.lock().unwrap().clone();
     if let Some(w) = pet_window(app) {
         let _ = w.set_size(LogicalSize::new(PET_SIZE.0, PET_SIZE.1));
-        let _ = w.set_position(LogicalPosition::new(settings.pet_x, settings.pet_y));
+        let _ = w.set_position(PhysicalPosition::new(settings.pet_x, settings.pet_y));
         if state.hidden.load(Ordering::SeqCst) {
             let _ = w.hide(); // 隐藏态提醒结束：继续隐身
         }
@@ -1103,17 +1123,18 @@ fn main() {
             if let Some(w) = handle.get_webview_window("pet") {
                 let (mut x, mut y) = (settings.pet_x, settings.pet_y);
                 // 屏幕外脏数据自愈：位置不在任何显示器逻辑范围内则回右下角
-                if x >= 0.0 && y >= 0.0 {
+                let scale = w.scale_factor().unwrap_or(1.0);
+                // 屏幕外脏数据自愈：物理坐标直接和显示器的物理范围比，不做任何 scale 折算
+                if x != -1.0 || y != -1.0 {
                     let visible = handle.available_monitors().map(|ms| {
                         ms.iter().any(|m| {
-                            let sc = m.scale_factor();
                             let mp = m.position();
                             let msz = m.size();
-                            let x0 = mp.x as f64 / sc;
-                            let y0 = mp.y as f64 / sc;
-                            let x1 = x0 + msz.width as f64 / sc;
-                            let y1 = y0 + msz.height as f64 / sc;
-                            x >= x0 - 50.0 && x <= x1 && y >= y0 - 50.0 && y <= y1
+                            let x0 = mp.x as f64;
+                            let y0 = mp.y as f64;
+                            let x1 = x0 + msz.width as f64;
+                            let y1 = y0 + msz.height as f64;
+                            x >= x0 - 80.0 && x <= x1 && y >= y0 - 80.0 && y <= y1
                         })
                     }).unwrap_or(true);
                     if !visible {
@@ -1122,24 +1143,23 @@ fn main() {
                         y = -1.0;
                     }
                 }
-                if x < 0.0 || y < 0.0 {
+                if x == -1.0 && y == -1.0 {
+                    // 默认：当前屏右下角（物理像素）
                     if let Some(m) = w.current_monitor().ok().flatten() {
-                        let ms = m.size();
-                        let scale = m.scale_factor();
-                        let lw = ms.width as f64 / scale;
-                        let lh = ms.height as f64 / scale;
-                        x = lw - PET_SIZE.0 - 24.0;
-                        y = lh - PET_SIZE.1 - 24.0;
+                        let mp = m.position();
+                        let msz = m.size();
+                        x = mp.x as f64 + msz.width as f64 - (PET_SIZE.0 + 24.0) * scale;
+                        y = mp.y as f64 + msz.height as f64 - (PET_SIZE.1 + 24.0) * scale;
                     }
                 }
-                let _ = w.set_position(LogicalPosition::new(x, y));
+                let _ = w.set_position(PhysicalPosition::new(x, y));
                 let _ = w.set_ignore_cursor_events(settings.click_through);
                 {
                     let mut s = settings.clone();
                     s.pet_x = x;
                     s.pet_y = y;
-                    s.save_key(&db, "pet_x");
-                    s.save_key(&db, "pet_y");
+                    s.save_key(&db, "pet_xp");
+                    s.save_key(&db, "pet_yp");
                 }
             }
 
@@ -1255,12 +1275,11 @@ fn main() {
                         if state.alerting.load(Ordering::SeqCst) {
                             return; // 提醒态窗口位移不记录
                         }
-                        // Moved 上报的是物理像素，必须先转逻辑坐标再存，
-                        // 否则 Retina 下每轮翻倍，位置指数级漂移出屏
-                        let scale = wf.scale_factor().unwrap_or(1.0);
-                        let logical = pos.to_logical::<f64>(scale);
+                        // 2026-09-30：直接存物理坐标（不再折算逻辑）——跨屏时 scale 会变，
+                        // 折算出来的逻辑值不构成稳定的全局坐标系
+                        let _ = &wf;
                         let mut last = state.last_saved_pos.lock().unwrap();
-                        let (lx, ly) = (logical.x, logical.y);
+                        let (lx, ly) = (pos.x as f64, pos.y as f64);
                         if (lx - last.0).abs() < 8.0 && (ly - last.1).abs() < 8.0 {
                             return;
                         }
@@ -1268,8 +1287,8 @@ fn main() {
                         let mut s = state.settings.lock().unwrap();
                         s.pet_x = lx;
                         s.pet_y = ly;
-                        s.save_key(&state.db, "pet_x");
-                        s.save_key(&state.db, "pet_y");
+                        s.save_key(&state.db, "pet_xp");
+                        s.save_key(&state.db, "pet_yp");
                     }
                 });
             }
@@ -1286,7 +1305,7 @@ fn main() {
             mark_den_seen,
             get_current_pack,
             set_settings,
-            drag_move,
+            drag_move_by,
             pause_resume,
             alert_rest,
             alert_snooze,
