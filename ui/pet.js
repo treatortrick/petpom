@@ -363,28 +363,44 @@
     if (e.target.closest("#pill") || e.target.closest("#timer-badge")) return; // 胶囊/时间牌点击不当作抚摸/拖拽
     e.preventDefault(); // 防 webview 原生图片拖拽/文本选中干扰
     try { stageEl.setPointerCapture(e.pointerId); } catch (_) {}
-    pressStart = { t: Date.now() };
+    // 按下点必须同步记下（阈值判断依赖它，不能等异步的窗口位置）
+    pressStart = { t: Date.now(), sx: e.screenX, sy: e.screenY };
     pressTimer = setTimeout(() => {
       pressTimer = null;
       petAction();
     }, 900);
-    // 异步取窗口当前逻辑坐标 + 记下指针屏幕坐标，组成拖拽锚点
+    // 窗口位置异步补；失败也不影响拖拽（拖拽时会按需再取一次）
+    dragBase = null;
     const sx0 = e.screenX, sy0 = e.screenY;
     curWin.outerPosition().then((p) => {
       const dpr = window.devicePixelRatio || 1;
-      dragBase = { wx: p.x / dpr, wy: p.y / dpr, sx: sx0, sy: sy0 };
-    }).catch(() => { dragBase = null; });
+      // 仅当还是同一次按下时才采用，避免过期位置套到新的按下上
+      if (pressStart && pressStart.sx === sx0) {
+        dragBase = { wx: p.x / dpr, wy: p.y / dpr, sx: sx0, sy: sy0 };
+      }
+    }).catch(() => {});
   });
 
-  stageEl.addEventListener("pointermove", (e) => {
+  stageEl.addEventListener("pointermove", async (e) => {
     if (!pressStart && !dragging) return;
     if (!dragging) {
       if (!pressStart) return;
-      const dx = e.screenX - (dragBase ? dragBase.sx : e.screenX);
-      const dy = e.screenY - (dragBase ? dragBase.sy : e.screenY);
+      // 阈值用同步的按下点判断（旧代码在锚点未就绪时退化成 dx=0，永远过不了门槛 →
+      // 表现为「第一次拖不动，得再来一次」）
+      const dx = e.screenX - pressStart.sx;
+      const dy = e.screenY - pressStart.sy;
       if (dx * dx + dy * dy <= 64) return; // 8px 内不算拖拽（保留单击抚摸）
       if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
-      if (!dragBase) return; // 锚点未就绪，本次先不拖
+      if (!dragBase) {
+        // 2026-09-30 修复：锚点还没就绪 → 按需补取，而不是放弃本次拖拽。
+        // 快速甩动时首帧往往早于异步窗口位置返回，旧逻辑会白白丢掉这一次拖拽。
+        try {
+          const p = await curWin.outerPosition();
+          const dpr = window.devicePixelRatio || 1;
+          dragBase = { wx: p.x / dpr, wy: p.y / dpr, sx: pressStart.sx, sy: pressStart.sy };
+        } catch (_) { return; }
+      }
+      if (!pressStart) return; // await 期间用户已松手
       dragging = true;
       play("walk"); // 被拎着走
     }
