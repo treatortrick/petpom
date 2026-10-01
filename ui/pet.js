@@ -768,7 +768,12 @@
   }
 
   function onCardReturn(p) {
+    // 2026-10-01 队长拍板：**专注期间只播「回来」动画，不弹卡片浮层、不吹气泡**。
+    // 理由：「专注时不打扰」是核心承诺，而 7 秒卡片浮层是一次完整打断；
+    // 卡片已经落库，专注结束后在「小窝」里就能看到（菜单也会提示有新东西）。
+    const quiet = lastPhase === "focus";
     comeBack(() => play(currentSteady()));
+    if (quiet) return;
     bubble(`我回来啦！给你带了「${p.name}」`, 4200);
     showCard(p);
   }

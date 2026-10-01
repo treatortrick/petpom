@@ -44,8 +44,10 @@ struct Settings {
     /// 最近一次「每日首次」送鱼日期（YYYY-MM-DD）。只做惊喜，不做断签惩罚：
     /// 漏一天就是少一条鱼，没有连续奖励、没有补签、没有损失。
     last_gift_date: String,
-    /// 窗口几何版本：窗口尺寸变化时用它做一次性位置迁移（见 startup 迁移块）
+    /// 窗口几何版本：窗口尺寸变化时用一次性迁移（见 startup 迁移块）
     geom_v: String,
+    /// 探险开关（2026-10-01）：关掉后投喂只给解释，不消耗鱼——把「被它绑住」的隐忧交还给用户
+    expedition: bool,
 }
 
 impl Default for Settings {
@@ -66,6 +68,7 @@ impl Default for Settings {
             pet_y: -1.0,
             last_gift_date: String::new(),
             geom_v: String::new(),
+            expedition: true,
         }
     }
 }
@@ -94,6 +97,7 @@ impl Settings {
         from_db("pet_yp", &mut |v| s.pet_y = v.parse().unwrap_or(s.pet_y));
         from_db("last_gift_date", &mut |v| s.last_gift_date = v.to_string());
         from_db("geom_v", &mut |v| s.geom_v = v.to_string());
+        from_db("expedition", &mut |v| s.expedition = v == "true");
         s
     }
 
@@ -114,6 +118,7 @@ impl Settings {
             "pet_yp" => self.pet_y.to_string(),
             "last_gift_date" => self.last_gift_date.clone(),
             "geom_v" => self.geom_v.clone(),
+            "expedition" => self.expedition.to_string(),
             // 2026-09-30：未知键必须留痕。此前是静默 return——改坐标存储键时漏改两处调用，
             // 位置根本没落库却毫无报错（排查成本极高）。
             other => {
@@ -379,6 +384,7 @@ const CARDS: &[Card] = &[
     Card { key: "sunlight", name: "窗台上的阳光", text: "我趴了一会儿，暖的。分你一半。", rarity: 0 },
     Card { key: "cloud", name: "云的影子", text: "从屋顶上慢慢走过去，我数了七秒。", rarity: 0 },
     Card { key: "notecard", name: "它的便签", text: "写着：今天也要记得喝水。", rarity: 0 },
+    Card { key: "no-worry", name: "夹在书里的小纸条", text: "不用天天喂我。你专心的时候，我自己找得到事做。", rarity: 0 },
     // —— 少见 ——
     Card { key: "wish", name: "陌生人的心愿便签", text: "贴在路灯上，写着「希望妈妈早点好起来」。", rarity: 1 },
     Card { key: "key", name: "生锈的小钥匙", text: "不知道开哪扇门，我先收好了。", rarity: 1 },
@@ -399,11 +405,16 @@ fn card_by_key(key: &str) -> Option<&'static Card> {
 
 const RARITY_LABEL: [&str; 3] = ["寻常", "少见", "珍贵"];
 
-fn roll_card() -> &'static Card {
+/// 抽卡：先按稀有度掷点，再在该档里**优先给没收集过的**。
+/// 不做「全池纯随机」的原因：那样集齐要 60+ 次投喂（优惠券收集问题），
+/// 用户会觉得「一直在拿重复的」，而重复卡带不来任何新东西。
+fn roll_card(owned: &std::collections::HashSet<String>) -> &'static Card {
     let n = nanos();
     let roll = (n / 7) % 100; // 与探险时长用的随机位错开
     let rarity: u8 = if roll < 10 { 2 } else if roll < 40 { 1 } else { 0 };
-    let pool: Vec<&Card> = CARDS.iter().filter(|c| c.rarity == rarity).collect();
+    let node: Vec<&Card> = CARDS.iter().filter(|c| c.rarity == rarity).collect();
+    let unowned: Vec<&Card> = node.iter().copied().filter(|c| !owned.contains(c.key)).collect();
+    let pool = if unowned.is_empty() { node } else { unowned };
     pool[(n as usize / 13) % pool.len()]
 }
 
@@ -757,15 +768,27 @@ fn feed_pet_internal(app: &AppHandle) {
         }
     }
 
-    // 2) 没有鱼：说清楚鱼从哪来（这是新用户唯一能得到的引导）
+    // 2) 探险被关掉：明确说明，不消耗任何东西
+    if !state.settings.lock().unwrap().expedition {
+        say(app, "探险先关掉啦～想在设置里重新打开就行。", 4500);
+        return;
+    }
+
+    // 3) 没有鱼：说清楚鱼从哪来（这是新用户唯一能得到的引导）
     let snacks = state.settings.lock().unwrap().snacks;
     if snacks <= 0 {
         say(app, "小鱼干不够啦～ 完成一轮专注我会带一颗回来。", 4500);
         return;
     }
 
-    // 3) 出发：扣鱼 + 亲密度 +1 + 抽定卡片 + 定到点时间
-    let card = roll_card();
+    // 4) 出发：扣鱼 + 亲密度 +1 + 抽定卡片 + 定到点时间
+    let owned: std::collections::HashSet<String> = state
+        .db
+        .den_cards()
+        .iter()
+        .map(|(k, _, _)| k.clone())
+        .collect();
+    let card = roll_card(&owned);
     let mins = 12 + (nanos() % 17) as i64; // 12~28 分钟，随机但一定有结果
     let due = now + chrono::Duration::minutes(mins);
     {
@@ -897,6 +920,10 @@ fn set_settings(app: AppHandle, state: tauri::State<AppState>, patch: Value) -> 
         s.hide_bubble = v;
         s.save_key(&state.db, "hide_bubble");
     }
+    if let Some(v) = patch.get("expedition").and_then(|x| x.as_bool()) {
+        s.expedition = v;
+        s.save_key(&state.db, "expedition");
+    }
     if let Some(v) = patch.get("pet_name").and_then(|x| x.as_str()) {
         // 命名规则（interaction-spec §3）：trim 后 ≤12 字符，空 = 回到形象默认名
         let trimmed: String = v.trim().chars().take(12).collect();
@@ -912,6 +939,18 @@ fn set_settings(app: AppHandle, state: tauri::State<AppState>, patch: Value) -> 
         use tauri_plugin_autostart::ManagerExt as _;
         let autostart = app.autolaunch();
         let _ = if v { autostart.enable() } else { autostart.disable() };
+    }
+    // 未知键留痕：set_settings 是白名单式实现，新增设置项漏加分支会静默失效（踩过两次）
+    if let Some(obj) = patch.as_object() {
+        const KNOWN: &[&str] = &[
+            "focus_min", "short_min", "long_every", "long_min", "pet_pack", "click_through",
+            "hide_bubble", "expedition", "pet_name", "autostart",
+        ];
+        for k in obj.keys() {
+            if !KNOWN.contains(&k.as_str()) {
+                eprintln!("[petpom] set_settings 未知键，已忽略: {k}");
+            }
+        }
     }
     drop(s);
     if pet_pack_changed {
