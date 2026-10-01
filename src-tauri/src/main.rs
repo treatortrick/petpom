@@ -150,6 +150,10 @@ struct AppState {
     react_final: AtomicBool,
     /// 本轮专注中被点击（开小差）的次数：进入新一轮专注时清零，结算时读取
     distractions: std::sync::atomic::AtomicU64,
+    /// 是否正在拖拽（用于「拖拽中到点提醒延后到松手」）
+    dragging: AtomicBool,
+    /// 拖拽期间到点的提醒，等松手后补发
+    pending_alert: Mutex<Option<(String, bool)>>,
     /// 拖拽期间的权威位置（物理像素）。拖动只累加这里，不每帧回读窗口位置——
     /// IPC + set_position 是异步的，回读到的是上一帧旧值，会把位移吃掉（表现为拖不动/卡住）
     drag_pos: Mutex<Option<(f64, f64)>>,
@@ -218,6 +222,7 @@ fn pet_window(app: &AppHandle) -> Option<WebviewWindow<Wry>> {
 /// 起拖：读一次真实窗口位置作为累加基准（只在拖拽开始时读，之后不再回读）
 #[tauri::command]
 fn drag_begin(app: AppHandle, state: tauri::State<AppState>) {
+    state.dragging.store(true, Ordering::SeqCst);
     if let Some(w) = pet_window(&app) {
         if let Ok(p) = w.outer_position() {
             *state.drag_pos.lock().unwrap() = Some((p.x as f64, p.y as f64));
@@ -227,8 +232,14 @@ fn drag_begin(app: AppHandle, state: tauri::State<AppState>) {
 
 /// 结束拖拽：清理累加器（位置由 window Moved 事件落库）
 #[tauri::command]
-fn drag_end(state: tauri::State<AppState>) {
+fn drag_end(app: AppHandle, state: tauri::State<AppState>) {
     *state.drag_pos.lock().unwrap() = None;
+    state.dragging.store(false, Ordering::SeqCst);
+    // 拖拽期间到点的提醒：松手后立刻补发（视觉上「拖完再叫」）
+    let pending = state.pending_alert.lock().unwrap().take();
+    if let Some((kind, limited)) = pending {
+        show_alert_ui(&app, &kind, limited);
+    }
 }
 
 /// 增量拖动：按**物理像素**增量移动窗口。
@@ -274,6 +285,11 @@ fn open_settings(app: &AppHandle) -> tauri::Result<()> {
 
 fn show_alert_ui(app: &AppHandle, kind: &str, limited: bool) {
     let Some(state) = app.try_state::<AppState>() else { return };
+    // 手指还按着时不抢：记下来，等 drag_end 补发（避免拖到一半窗口突变、宠物被甩开）
+    if state.dragging.load(Ordering::SeqCst) {
+        *state.pending_alert.lock().unwrap() = Some((kind.to_string(), limited));
+        return;
+    }
     let settings = state.settings.lock().unwrap().clone();
     // 提醒优先（interaction-spec 红线「提醒到点强制弹现」）：
     // 它若正在外面，必须赶回来——否则窗口弹了、宠物却还隐身着，提醒变成没有主角。
@@ -939,7 +955,7 @@ fn alert_rest(app: AppHandle, state: tauri::State<AppState>) {
         st.snacks = (st.snacks + 1).min(9);
         st.save_key(&state.db, "snacks");
     }
-    hide_alert_ui(&app, "rest"); // 前端：happy 播一遍落定到 sit 循环
+    hide_alert_ui(&app, ""); // 稳态由 phase(rest) 驱动；前端会先播 happy 庆祝再睡
     let _ = app.emit("pet/bubble", serde_json::json!({ "text": named("好耶！去休息吧，{n}也睡会儿～", &s), "ms": 4000 }));
 
     // 结算卡（P0-1）：完成瞬间的正反馈 = 本轮时长 + 今日累计 + 亲密度
@@ -971,7 +987,7 @@ fn alert_rest(app: AppHandle, state: tauri::State<AppState>) {
 #[tauri::command]
 fn alert_snooze(app: AppHandle, state: tauri::State<AppState>) {
     let _ = state.timer.0.send(timer::Cmd::SnoozeFocus { min: 5 });
-    hide_alert_ui(&app, "walk");
+    hide_alert_ui(&app, ""); // phase 已回到 focus → 稳态自动回到「看书」
     let s = state.settings.lock().unwrap().clone();
     let _ = app.emit("pet/bubble", serde_json::json!({ "text": named("那就…再等你 5 分钟哦", &s), "ms": 4000 }));
 }
@@ -997,13 +1013,13 @@ fn rest_done(app: AppHandle, state: tauri::State<AppState>) {
     let min = state.settings.lock().unwrap().focus_min as u64;
     let _ = state.timer.0.send(timer::Cmd::RestDone);
     let _ = state.timer.0.send(timer::Cmd::StartFocus { min });
-    hide_alert_ui(&app, "focus");
+    hide_alert_ui(&app, ""); // phase 变 focus → 自动回到「看书」
 }
 
 #[tauri::command]
 fn rest_snooze(app: AppHandle, state: tauri::State<AppState>) {
     let _ = state.timer.0.send(timer::Cmd::RestSnooze { min: 5 });
-    hide_alert_ui(&app, "walk");
+    hide_alert_ui(&app, ""); // phase 仍为 rest → 继续睡
 }
 
 fn build_context_menu(
@@ -1121,6 +1137,15 @@ fn frontend_ready(app: AppHandle, info: String) {
     let a = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(700));
+        // 把当前阶段同步给前端：形态的唯一驱动源是 phase，页面重载后也要能还原
+        {
+            let st = a.state::<AppState>();
+            let (phase, paused, _urgent, remain) = st.ui_phase.lock().unwrap().clone();
+            let _ = a.emit(
+                "timer/tick",
+                serde_json::json!({ "phase": phase, "remaining_sec": remain, "paused": paused }),
+            );
+        }
         settle_due_expeditions(&a, true); // 离线产出：app 没开也在走时间
         daily_first_gift(&a);             // 每天第一条鱼
     });
@@ -1310,6 +1335,8 @@ fn main() {
                 react_final: AtomicBool::new(false),
                 distractions: std::sync::atomic::AtomicU64::new(0),
                 drag_pos: Mutex::new(None),
+                dragging: AtomicBool::new(false),
+                pending_alert: Mutex::new(None),
             });
 
             build_tray(&h2)?;

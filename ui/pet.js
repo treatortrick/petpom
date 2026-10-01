@@ -37,10 +37,61 @@
   let lastSteadyState = "idle"; // 摸头动画结束后的回落状态（静止待机）
   let petName = "奶油";         // 宠物名（Rust 侧 get_pet_name，气泡文案用）
 
-  // 回落状态必须真实存在：包里没有该动画（如 tuantuan 无 sit）就落回 idle，
+  // 回落状态必须真实存在：包里没有该动画就落回 idle，
   // 防止 onDone 回落到不存在的 key 被回退逻辑吞掉后卡帧
   function setSteady(key) {
     lastSteadyState = pack && pack.anims[key] ? key : "idle";
+  }
+
+  /* ============ 稳态（L0）唯一驱动源：phase（2026-09-30 重构） ============
+   * 之前状态逻辑散落在各菜单命令里（谁能想到「跳过」还要自己发一次形态事件），
+   * 于是漏了 6 条路径：跳过专注/跳过休息/婉拒/赖床/休眠失效/暂停。
+   * 现在改成：**稳态只由 phase 求值**，任何新增路径都不会再漏。
+   *
+   * 三层模型（对照 Shimeji 的 Stay/Animate 与游戏动画状态机）：
+   *   L2 交互态（拖拽/隐身/提醒）> L1 一次性反应（happy/sad/eat/leave/return/micro-*）> L0 稳态
+   * 规则：L1 播完一律回到「当前稳态」（动态求值，不写死）；每个状态都有出口。
+   */
+  let lastPhase = "idle";
+  let lastPaused = false;
+  let restCelebrated = false;   // 每次进入休息只庆祝一次
+  let oneShotActive = false;    // L1 一次性动画播放中（期间不切稳态）
+
+  function steadyFor(phase, paused) {
+    if (phase === "focus") return paused ? "sit" : "focus";  // 暂停 = 坐下来歇会儿
+    if (phase === "rest") return "rest";                     // 休息中暂停保持睡姿
+    if (phase === "alert-focus" || phase === "alert-rest") return "alert";
+    return "idle";
+  }
+
+  function currentSteady() {
+    return pack && pack.anims[lastSteadyState] ? lastSteadyState : "idle";
+  }
+
+  function applyPhase(phase, paused) {
+    if (!pack) return;
+    const changed = phase !== lastPhase;
+    lastPhase = phase;
+    lastPaused = !!paused;
+    if (petAway && phase !== "alert-focus" && phase !== "alert-rest") return; // 出门中不打扰隐身
+    const want = steadyFor(phase, paused);
+    // 进入休息：先开心一下再趴下睡（只在「刚进入休息」时播一次）
+    if (want === "rest") {
+      if (!restCelebrated) {
+        restCelebrated = true;
+        setSteady("rest");
+        play("happy", { onDone: () => play(currentSteady()) });
+        scheduleRestStretch();
+      }
+      return;
+    }
+    restCelebrated = false;
+    if (want === lastSteadyState && !changed) return; // 已在目标稳态，别重启动画
+    setSteady(want); // 目标稳态先记下（一次性动画结束后会回落到它）
+    // 优先级：L2 交互态（拖拽）> L1 一次性 > L0 稳态。
+    // 只更新目标、不抢播——否则「跳过→sad」会被紧随其后的稳态切换掐掉。
+    if (dragging || oneShotActive) return;
+    play(want);
   }
 
   /* ============ sprite 播放器 ============ */
@@ -146,6 +197,12 @@
   }
 
   function play(stateKey, opts = {}) {
+    // L1 标记：带 onDone 的调用都是一次性反应，播完前不被 L0 稳态切换打断
+    if (typeof opts.onDone === "function") {
+      const userDone = opts.onDone;
+      oneShotActive = true;
+      opts = { ...opts, onDone: () => { oneShotActive = false; userDone(); } };
+    }
     if (!pack) return;
     let spec = pack.anims[stateKey];
     if (!spec) {
@@ -442,7 +499,7 @@
     pressStart = null;
     if (wasDrag) {
       setFacing(0); // 回基准朝向
-      play(lastSteadyState || "idle");
+      play(currentSteady());
       return;
     }
     // 短按（未拖拽、未达长按阈值）= 抚摸；提醒态外只抚摸，不做任何其它逻辑
@@ -454,7 +511,7 @@
     if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
     pressStart = null;
     setFacing(0);
-    play(lastSteadyState || "idle");
+    play(currentSteady());
   });
 
   /* 悬停反应（P1-12）：驻留 1.5s + 30s 冷却，拖拽/提醒/按压中不触发 */
@@ -469,7 +526,7 @@
       if (!keys.length) return;
       hoverCooldownUntil = Date.now() + 30000;
       const k = keys[Math.floor(Math.random() * keys.length)];
-      play(k, { onDone: () => { if (player && player.state === k) play(lastSteadyState); } });
+      play(k, { onDone: () => { if (player && player.state === k) play(currentSteady()); } });
     }, 1500);
   });
   stageEl.addEventListener("pointerleave", () => clearTimeout(hoverTimer));
@@ -504,7 +561,7 @@
       return;
     }
     // 非提醒态：纯摸头，pet 动画 1 遍后回原状态 + 随机抚摸反馈（interaction-spec #1）
-    play("pet", { onDone: () => play(lastSteadyState) });
+    play("pet", { onDone: () => play(currentSteady()) });
     const petLines = [
       "呼噜呼噜…最喜欢你啦～",
       "嘿嘿，被摸头就会开心。",
@@ -616,7 +673,7 @@
     clearTimeout(restStretchTimer);
     restStretchTimer = setTimeout(() => {
       if (pack && player && player.state === "sit" && !alerting && !reduceMotion && pack.anims["rest-stretch"]) {
-        play("rest-stretch", { onDone: () => { if (player && player.state === "rest-stretch") play(lastSteadyState); } });
+        play("rest-stretch", { onDone: () => { if (player && player.state === "rest-stretch") play(currentSteady()); } });
       }
     }, 20000);
   }
@@ -711,7 +768,7 @@
   }
 
   function onCardReturn(p) {
-    comeBack(() => play(lastSteadyState));
+    comeBack(() => play(currentSteady()));
     bubble(`我回来啦！给你带了「${p.name}」`, 4200);
     showCard(p);
   }
@@ -724,20 +781,18 @@
       const s = e.payload.state === "walk" ? "idle" : e.payload.state;
       if (s !== "rest") cancelRestStretch(); // 离开休息态取消未触发的伸懒腰
       if (s === "rest") {
-        // 休息：先 happy 播一遍庆祝，再落定到睡觉循环（旧包无 rest 映射则回 sit）
-        setSteady(pack.anims.rest ? "rest" : "sit");
-        play("happy", { onDone: () => play(lastSteadyState) });
-        scheduleRestStretch(); // 休息期轻互动（P1-10）
+        // 兼容路径：稳态已由 phase 驱动，这里只保证「进入休息」被庆祝一次
+        applyPhase("rest", false);
       } else if (s.startsWith("micro-")) {
         // 反应插播（interaction-spec #3/#4）：播一遍回原状态，不改 lastSteadyState
-        if (pack.anims[s]) play(s, { onDone: () => play(lastSteadyState) });
+        if (pack.anims[s]) play(s, { onDone: () => play(currentSteady()) });
       } else if (s === "eat") {
         // 投喂：吃完就出门（eat → leave → 淡出）
         const key = pack.anims.eat ? "eat" : "happy";
         play(key, { onDone: () => depart() });
       } else if (s === "happy" || s === "sad") {
         setSteady("idle");
-        play(s, { onDone: () => play(lastSteadyState) });
+        play(s, { onDone: () => play(currentSteady()) });
       } else {
         setSteady(s === "focus" ? "focus" : "idle");
         if (s === "focus") resetNudge(); // 新一轮专注：开小差档位归零
@@ -764,17 +819,19 @@
     await listen("timer/tick", (e) => {
       const p = e.payload;
       renderBadge(p.phase, p.remaining_sec, p.paused);
+      applyPhase(p.phase, p.paused); // 稳态唯一驱动源（轮询式）
     });
     await listen("timer/state", (e) => {
       // 阶段切换兜底：空闲/提醒态立即收牌（提醒胶囊已承载时间信息）
       const p = e.payload.phase || "";
       if (p === "idle" || p.startsWith("alert-")) badgeEl.classList.remove("on");
+      applyPhase(p, lastPaused); // 立刻切，不等下一次 tick
     });
     await listen("stats/settle", (e) => showSettle(e.payload));
     await listen("pet/card", (e) => onCardReturn(e.payload));
     // 撤销式召回：它空手回来（Rust 已退还小鱼干/回退亲密度，气泡由 Rust 发）
     await listen("pet/recall", () => {
-      comeBack(() => play(lastSteadyState));
+      comeBack(() => play(currentSteady()));
     });
 
     try {
