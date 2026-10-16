@@ -155,6 +155,8 @@ struct AppState {
     react_final: AtomicBool,
     /// 本轮专注中被点击（开小差）的次数：进入新一轮专注时清零，结算时读取
     distractions: std::sync::atomic::AtomicU64,
+    /// 提醒态窗口展开方向："right" 右扩（宠物在左）/ "left" 左扩（宠物在右，需镜像）
+    alert_side: Mutex<String>,
     /// 是否正在拖拽（用于「拖拽中到点提醒延后到松手」）
     dragging: AtomicBool,
     /// 拖拽期间到点的提醒，等松手后补发
@@ -318,11 +320,24 @@ fn show_alert_ui(app: &AppHandle, kind: &str, limited: bool) {
         let _ = w.show(); // 隐藏态也要弹现提醒（interaction-spec 红线）
         let _ = w.set_size(LogicalSize::new(ALERT_SIZE.0, ALERT_SIZE.1));
         // 左扩 + 上移：尺寸/位移是逻辑值，窗口坐标是物理值 → 乘 scale 换算
-        // 提醒态窗口锚点：让「宠物」在两套窗口尺寸下屏幕位置不变。
-        // 水平：放宽后宠物画在窗口右侧（index.html 的 #stage.alerting #pet），
-        //       所以左移 PET_SIZE+PET_LEFT*2 的差值；垂直：底边对齐由高度差决定。
+        // 提醒态窗口锚点（2026-10-15 重做）：
+        // 目标有两个，必须同时满足——① 宠物的屏幕位置不变（否则「弹提醒」时宠物横跳）
+        // ② 胶囊与宠物不重叠（上一版把宠物移到大窗口右侧、胶囊却仍在右侧 → 宠物被完全遮住）。
+        // 做法：看右边还有没有 510px 空间，有就向右扩（宠物在左、胶囊在右，互不遮挡），
+        // 没有就向左扩（宠物在右、胶囊在左，由前端 .alerting-left 镜像）。
         let sc = w.scale_factor().unwrap_or(1.0);
-        let alert_dx = PET_LEFT_CSS - (ALERT_SIZE.0 - PET_LEFT_CSS - PET_BOX_CSS);
+        let right_space = w
+            .current_monitor()
+            .ok()
+            .flatten()
+            .map(|m| m.position().x as f64 + m.size().width as f64 - settings.pet_x)
+            .unwrap_or(0.0);
+        let side = if right_space >= ALERT_SIZE.0 * sc { "right" } else { "left" };
+        let alert_dx = if side == "right" {
+            0.0 // 右扩：宠物仍在窗口左侧原位（left:18），屏幕位置天然不变
+        } else {
+            PET_LEFT_CSS - (ALERT_SIZE.0 - PET_LEFT_CSS - PET_BOX_CSS)
+        };
         let pet_top_in_pet_win = PET_SIZE.1 - PET_BOTTOM_CSS - PET_BOX_CSS;
         let pet_top_in_alert_win = ALERT_SIZE.1 - PET_BOTTOM_CSS - PET_BOX_CSS;
         let alert_dy = pet_top_in_pet_win - pet_top_in_alert_win;
@@ -330,11 +345,16 @@ fn show_alert_ui(app: &AppHandle, kind: &str, limited: bool) {
             settings.pet_x + alert_dx * sc,
             settings.pet_y + alert_dy * sc,
         ));
+        *state.alert_side.lock().unwrap() = side.to_string();
     }
     state.alerting.store(true, Ordering::SeqCst);
     let _ = app.emit(
         "alert/show",
-        serde_json::json!({ "kind": kind, "limited": limited, "hide_bubble": settings.hide_bubble, "focus_min": settings.focus_min }),
+        serde_json::json!({
+            "kind": kind, "limited": limited, "hide_bubble": settings.hide_bubble,
+            "focus_min": settings.focus_min,
+            "side": state.alert_side.lock().unwrap().clone(),
+        }),
     );
     if kind == "focus-end" {
         // 完成庆祝（interaction-spec #5）
@@ -1376,6 +1396,7 @@ fn main() {
                 drag_pos: Mutex::new(None),
                 dragging: AtomicBool::new(false),
                 pending_alert: Mutex::new(None),
+                alert_side: Mutex::new("right".to_string()),
             });
 
             build_tray(&h2)?;

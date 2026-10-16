@@ -809,13 +809,15 @@
       // 双保险：提醒到点时宠物必须在场（它若正在外面，Rust 已让它赶回来，
       // 这里再强制解除隐身，避免任何竞态导致"窗口弹了但宠物看不见"）
       if (petAway) setAway(false);
-      stageEl.classList.add("alerting"); // 放大窗口布局：宠物定位到右侧（见 index.html）
+      // 放大窗口：右扩时宠物留在左侧（默认定位），左扩时镜像到右侧（.alerting-left）
+      stageEl.classList.add("alerting");
+      stageEl.classList.toggle("alerting-left", e.payload.side === "left");
       setSteady("idle");
       showAlert(e.payload);
       pillEl.classList.add("show");
     });
     await listen("alert/hide", () => {
-      stageEl.classList.remove("alerting");
+      stageEl.classList.remove("alerting", "alerting-left");
       if (alerting) hideAlert(false);
     });
     await listen("pet/toast", (e) => toast(e.payload.text));

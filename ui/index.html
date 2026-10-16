@@ -51,10 +51,14 @@
 
   /* 提醒态：窗口向左扩（右缘对齐），宠物固定在大窗口右侧，
      这样「弹提醒」时宠物不会横跳（765-18-192=555）。 */
-  #stage.alerting #pet { left:555px; }
-  #stage.alerting #bubble { left:651px; }
-  #stage.alerting #card-pop { left:651px; }
-  #stage.alerting #timer-badge { display:none; }
+  /* 左扩（宠物贴近屏幕右缘时）：宠物放在大窗口右侧，胶囊改到左侧——两者必须分居两边，
+     否则 330px 宽的胶囊会把它整个盖住（2026-10-15 修的 bug）。 */
+  #stage.alerting-left #pet { left:555px; }
+  #stage.alerting-left #bubble { left:651px; }
+  #stage.alerting-left #card-pop { left:651px; }
+  #stage.alerting-left #pill { left:15px; right:auto; }
+  #stage.alerting #timer-badge, #stage.alerting-left #timer-badge { display:none; }
+  /* 右扩（默认）：宠物留在窗口左侧原位，胶囊在右侧——沿用默认定位，无需额外规则 */
 
   /* ===== 程序补间动作（幅度克制，避免与帧动画打架） ===== */
   @keyframes mBreath { 0%,100% { transform:scale(1,1) translateY(0); } 50% { transform:scale(1.008,1.022) translateY(0); } }
