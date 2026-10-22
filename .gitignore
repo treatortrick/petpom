@@ -1,17 +1,27 @@
+# ── 依赖与构建产物（可再生，不进仓库） ──
 node_modules/
 src-tauri/target/
 src-tauri/gen/
-.DS_Store
-
-# 运行时数据库（用户设置 / 番茄记录），不入库
-data/
-
-# 已打包成品（由 tauri build 产物复制而来）
 dist/
-# 资产管线 Python 环境（可再生：pip install -r assets/requirements.txt）
-assets/.venv/
 
-# 仅本地保留、不入库（2026-10-22：远程仓库只放软件代码）
+# ── 系统 / 编辑器噪声 ──
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# ── 本地数据与备份 ──
+# 运行时数据库（用户设置 / 番茄记录）
+data/
+# git bundle 备份文件（放项目里时不要入库）
+*.bundle
+
+# ── 凭据（务必不要提交；需要示例时用 .env.example） ──
+.env
+.env.*
+!.env.example
+
+# ── 仅本地保留、不入库（2026-10-22：远程仓库只放软件代码） ──
 README.md
 docs/
 assets/
