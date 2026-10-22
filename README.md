@@ -13,12 +13,12 @@ V0 只验证一件事：**情感化提醒是否真的比弹窗提醒更容易被
 | 项 | 要求 |
 |---|---|
 | 系统 | **macOS**（暂不支持 Windows / Linux） |
-| 芯片 | **Apple Silicon**（M1/M2/M3/M4…）<br>Intel Mac 需[从源码构建](#从源码构建) |
+| 芯片 | **Apple Silicon 或 Intel 均可**（Release 是 Universal 通用二进制） |
 | 其他 | 无需网络、无需账号；数据只存本机 |
 
 ### 安装
 
-1. 打开 [Releases](https://github.com/treatortrick/petpom/releases) 下载 `PetPom-macos-arm64.zip`
+1. 打开 [Releases](https://github.com/treatortrick/petpom/releases) 下载 `PetPom-macos-universal.zip`（约 11 MB）
 2. 解压，把 `PetPom.app` 拖进「应用程序」
 3. **首次打开会被系统拦截**（应用没有 Apple 开发者签名）：
    - 在「应用程序」里**右键**点 `PetPom.app` → 选「**打开**」→ 弹窗里再点一次「打开」
@@ -102,7 +102,7 @@ V0 只验证一件事：**情感化提醒是否真的比弹窗提醒更容易被
 应用未签名。右键 → 打开 → 再点「打开」；或 `xattr -dr com.apple.quarantine /Applications/PetPom.app`。
 
 **Q：Intel Mac 能用吗？**
-Release 里的二进制是 arm64。Intel 需要自行编译（见下）：`rustup target add x86_64-apple-darwin` 后指定 target 构建。
+能。Release 提供 **Universal 二进制**（同时包含 arm64 与 x86_64），M 系列和 Intel 都能直接跑。
 
 **Q：点了宠物没反应？**
 两个可能：①菜单里开了「鼠标穿透」，关掉即可；②点在了它周围的透明区域—— **只有可见的宠物轮廓和时间牌才算热区**，其余区域点击会穿透给后面的应用。
@@ -130,6 +130,10 @@ git clone https://github.com/treatortrick/petpom.git
 cd petpom
 npm install
 npx tauri build      # 约 3 分钟，产物在 src-tauri/target/release/bundle/macos/
+
+# 打 Apple Silicon + Intel 通用包（需先装另一架构的 target）
+rustup target add x86_64-apple-darwin
+npx tauri build --target universal-apple-darwin
 ```
 
 开发调试可直接跑：
@@ -174,7 +178,7 @@ assets/                 动画资产生产管线（抽帧 / 抠底 / 量化）
 
 ## 已知限制
 
-1. **仅 macOS**：`bundle.targets = ["app"]`，窗口的 `acceptFirstMouse` 也是 macOS 专用。Windows / Linux 未适配
+1. **仅 macOS**：`bundle.targets = ["app"]`，窗口的 `acceptFirstMouse` 也是 macOS 专用。Windows / Linux 未适配（架构已覆盖 Intel + Apple Silicon）
 2. **未签名、未公证**：首次打开必须手动绕过 Gatekeeper；跨机器分发时系统会重置隔离标记
 3. **无法从零重建动画资产**：管线脚本在仓库里，但源视频（约 340 MB）不在。可以处理你自己的视频，但无法复现现有的 170 帧
 4. **无 CI / 自动发布**：Releases 由本地构建后手动上传
