@@ -10,3 +10,9 @@ data/
 dist/
 # 资产管线 Python 环境（可再生：pip install -r assets/requirements.txt）
 assets/.venv/
+
+# 仅本地保留、不入库（2026-10-22：远程仓库只放软件代码）
+README.md
+docs/
+assets/
+tools/
