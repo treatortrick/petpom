@@ -5,3 +5,8 @@ src-tauri/gen/
 
 # 运行时数据库（用户设置 / 番茄记录），不入库
 data/
+
+# 已打包成品（由 tauri build 产物复制而来）
+dist/
+# 资产管线 Python 环境（可再生：pip install -r assets/requirements.txt）
+assets/.venv/
