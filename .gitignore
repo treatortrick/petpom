@@ -13,7 +13,7 @@ dist/
 # ── 本地数据与备份 ──
 # 运行时数据库（用户设置 / 番茄记录）
 data/
-# git bundle 备份文件（放项目里时不要入库）
+# git bundle 备份文件
 *.bundle
 
 # ── 凭据（务必不要提交；需要示例时用 .env.example） ──
@@ -21,8 +21,13 @@ data/
 .env.*
 !.env.example
 
-# ── 仅本地保留、不入库（2026-10-22：远程仓库只放软件代码） ──
-README.md
+# ── 资产管线：脚本入库，环境与产物不入库 ──
+assets/*
+!assets/*.py
+!assets/requirements.txt
+!assets/README.md
+!assets/shiba/
+
+# ── 仅本地保留（交互/动画规格文档、开发工具） ──
 docs/
-assets/
 tools/

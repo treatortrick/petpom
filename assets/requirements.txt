@@ -1,0 +1,4 @@
+资产管线依赖（项目本地 venv：assets/.venv）
+pillow>=10
+numpy>=1.26
+opencv-python>=4.9  # 仅 extract_frames.py（视频→帧）需要
