@@ -147,5 +147,7 @@
   "ambient_note": "focus-tidy 每 60~120 秒随机插播一次后回 focus；rest-stretch 休息开始 20 秒后播一次",
   "particles_note": "Zzz 粒子由引擎运行时叠加，不烧进帧",
   "rendering": "image-rendering:pixelated；画布 192 与显示尺寸 192 严格 1:1（Retina 下 2× 整数缩放）",
-  "travel_note": "leave / return 是位移动画，必须用 build_v2.py --travel leave,return 处理（所有帧共用裁剪窗口，否则逐帧居中会把位移压成原地摆动）"
+  "travel_note": "leave / return 是位移动画，必须用 build_v2.py --travel leave,return 处理（所有帧共用裁剪窗口，否则逐帧居中会把位移压成原地摆动）",
+  "hit_mask": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f0000000e0e3f9010000f0ffff010000f0ffff010000f0ffff010000e0ffff050000e0ffff0f0000f0ffff0f0000f8ffff0f0000f8ffff0f0000f8ffff0f0000f8ffff0f0000f0ffff1f0000f0ffff3f0000f0ffff3f0000e0ffff3f0000f0ffff3f0000f0ffff3f0000f8ffff3f0000fcffffff0100f8ffffff0100f8ffffff0300f0ffffff0300f0ffffff0300e0ffffff0300e0ffffff010080ffffff0100f0ffffff0000f8ffffff000000ffffff000080ffffff000080ffff7f000080ffff1f0000c0ffff0100",
+  "hit_mask_note": "48×48 轮廓并集（idle/sit/focus-read/rest/alert/walk），4px 一格，每字节 8 格；用于热区命中测试"
 }

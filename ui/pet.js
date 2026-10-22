@@ -186,7 +186,9 @@
           .catch(() => {});
       });
     }
+    packHitMask = decodeHitMask(manifest.hit_mask); // 构建期算好的轮廓掩码
     play("idle"); // 默认待机
+    pushHitMask();
   }
 
   // 程序补间：把状态映射成 CSS 动作类（none / breath / doze / sway / bounce / press）
@@ -225,6 +227,7 @@
     });
     motionEl.appendChild(box);
     requestAnimationFrame(() => box.classList.add("on"));
+    pushHitMask(); // 动作换了，轮廓热区跟着换
     motionEl.querySelectorAll(".anim").forEach((o) => {
       if (o !== box && o.classList.contains("on")) {
         o.classList.remove("on");
@@ -406,6 +409,7 @@
     if (facing === dir) return;
     facing = dir;
     petEl.style.transform = dir === 1 ? "scaleX(-1)" : "";
+    pushHitMask(); // 镜像后轮廓左右翻转，热区要跟着变
   }
 
   // 诊断探针已移除（拖拽根因=WKWebView 原生图片拖拽，已修复）
@@ -708,6 +712,7 @@
     badgeTime.textContent = fmtMMSS(remain);
     // 时间牌可见时气泡上移让位（两者同轴在宠物头顶，否则会叠在一起）
     bubbleEl.classList.toggle("up", badgeEl.classList.contains("on"));
+    pushHitMask(); // 时间牌是热区之一，显隐要同步
   }
   /* 避让改为「由当前可见元素推导」而不是计数：
      2026-09-23 修复——气泡与结算卡同时出现时，先结束的那个会 badgeDuck(false)，
@@ -725,6 +730,72 @@
   });
 
   /* ============ Rust 事件 ============ */
+  /* ============ 命中掩码（热区）2026-10-16 ============
+   * 队长反馈：热区太大、空白处也吃点击，很容易误触。
+   * 窗口是整块 255×235 的透明矩形，光靠 CSS 挡不住事件（点空白处仍被窗口吃掉）——
+   * 真穿透只能靠动态切换 ignoresMouseEvents，所以把「宠物轮廓 + 可点 UI」压成掩码交给 Rust。
+   *
+   * 轮廓不在这里现算：WebKit 里对未解码的 Image 做 canvas 取样会得到空图
+   * （帧是 clone 进 DOM 之后才解码的），实测 cells 恒为 0 → 宠物直接点不到。
+   * 改成构建期离线算好写进 manifest.hit_mask（48×48，1 格=4px，每字节 8 格）。
+   */
+  const HIT_CELL = 4;
+  const HIT_W = Math.ceil(255 / HIT_CELL);
+  const HIT_H = Math.ceil(235 / HIT_CELL);
+  let packHitMask = null; // Uint8Array(48*48)
+  let lastHitHex = "";
+
+  function decodeHitMask(hex) {
+    if (!hex) return null;
+    const g = new Uint8Array(48 * 48);
+    for (let i = 0; i < g.length; i++) {
+      const byte = parseInt(hex.substr(Math.floor(i / 8) * 2, 2), 16) || 0;
+      g[i] = (byte >> (i % 8)) & 1;
+    }
+    return g;
+  }
+
+  function pushHitMask() {
+    if (!pack || !packHitMask) return; // 没有掩码就交给 Rust 兜底（整窗可点，绝不失联）
+    const g = new Uint8Array(HIT_W * HIT_H);
+    const mark = (x, y, w, h) => {
+      const x0 = Math.max(0, Math.floor(x / HIT_CELL));
+      const y0 = Math.max(0, Math.floor(y / HIT_CELL));
+      const x1 = Math.min(HIT_W - 1, Math.floor((x + w - 0.01) / HIT_CELL));
+      const y1 = Math.min(HIT_H - 1, Math.floor((y + h - 0.01) / HIT_CELL));
+      for (let cy = y0; cy <= y1; cy++) for (let cx = x0; cx <= x1; cx++) g[cy * HIT_W + cx] = 1;
+    };
+    // 1) 宠物轮廓（镜像时横向翻转取样）
+    const r = petEl.getBoundingClientRect();
+    const cell = r.width / 48;
+    const mirrored = facing === 1;
+    for (let cy = 0; cy < 48; cy++) {
+      for (let cx = 0; cx < 48; cx++) {
+        if (!packHitMask[cy * 48 + cx]) continue;
+        const sx = mirrored ? 47 - cx : cx;
+        mark(r.left + sx * cell, r.top + cy * cell, cell, cell);
+      }
+    }
+    // 2) 可点 UI：时间牌（点它暂停）、提醒胶囊（有按钮）
+    const markEl = (el) => {
+      const b = el.getBoundingClientRect();
+      if (b.width > 0 && b.height > 0) mark(b.left, b.top, b.width, b.height);
+    };
+    if (badgeEl.classList.contains("on")) markEl(badgeEl);
+    if (pillEl.classList.contains("show")) markEl(pillEl);
+
+    // 打包：每字节 8 格（bit k = 第 k 格），2 个十六进制字符 = 1 字节（与 Rust 解码一致）
+    let hex = "";
+    for (let i = 0; i < g.length; i += 8) {
+      let b = 0;
+      for (let k = 0; k < 8 && i + k < g.length; k++) if (g[i + k]) b |= 1 << k;
+      hex += b.toString(16).padStart(2, "0");
+    }
+    if (hex === lastHitHex) return;
+    lastHitHex = hex;
+    invoke("set_hit_mask", { mask: hex, w: HIT_W, h: HIT_H }).catch(() => {});
+  }
+
   /* ============ 出门 / 回来（2026-09-23） ============
    * 出门：eat → leave（走出画布左缘）→ 淡出，桌面不留痕迹
    * 回来：淡入 → return（跑回来）→ 落定后弹卡片
@@ -811,6 +882,7 @@
       if (petAway) setAway(false);
       // 放大窗口：右扩时宠物留在左侧（默认定位），左扩时镜像到右侧（.alerting-left）
       stageEl.classList.add("alerting");
+      pushHitMask();
       stageEl.classList.toggle("alerting-left", e.payload.side === "left");
       setSteady("idle");
       showAlert(e.payload);
@@ -818,6 +890,7 @@
     });
     await listen("alert/hide", () => {
       stageEl.classList.remove("alerting", "alerting-left");
+      pushHitMask();
       if (alerting) hideAlert(false);
     });
     await listen("pet/toast", (e) => toast(e.payload.text));

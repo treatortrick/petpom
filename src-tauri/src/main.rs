@@ -155,6 +155,11 @@ struct AppState {
     react_final: AtomicBool,
     /// 本轮专注中被点击（开小差）的次数：进入新一轮专注时清零，结算时读取
     distractions: std::sync::atomic::AtomicU64,
+    /// 掩码里可点的格子数（0 = 掩码无效 → 兜底为整窗可点，绝不能把宠物变成完全透明）
+    hit_cells: std::sync::atomic::AtomicU64,
+    /// 命中掩码（按窗口 CSS 像素网格，1=可点）：只有宠物可见部分与可点 UI 算热区。
+    /// 空 = 还没收到（此时不做穿透，退化为整窗热区）。
+    hit: Mutex<(u32, u32, Vec<u8>)>,
     /// 提醒态窗口展开方向："right" 右扩（宠物在左）/ "left" 左扩（宠物在右，需镜像）
     alert_side: Mutex<String>,
     /// 是否正在拖拽（用于「拖拽中到点提醒延后到松手」）
@@ -226,6 +231,135 @@ fn pet_window(app: &AppHandle) -> Option<WebviewWindow<Wry>> {
 /// 手动拖拽：前端按指针位移算出新窗口坐标发过来，这里直接落位。
 /// 不用系统的 startDragging —— macOS 上它在 pointermove 里调用会有
 /// 陈旧 mouseDown 锚点 / 拖拽会话吞掉 mouseup 的问题（只能拖一次/拖不远）。
+/// 前端下发命中掩码（十六进制字符串，1 字节 1 个格子；w×h 为格数）
+#[tauri::command]
+fn set_hit_mask(state: tauri::State<AppState>, mask: String, w: u32, h: u32) {
+    let mut data = Vec::with_capacity(mask.len() / 2);
+    let bytes = mask.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let hi = (bytes[i] as char).to_digit(16);
+        let lo = (bytes[i + 1] as char).to_digit(16);
+        if let (Some(a), Some(b)) = (hi, lo) {
+            data.push((a * 16 + b) as u8);
+        }
+        i += 2;
+    }
+    let first = {
+        let g = state.hit.lock().unwrap();
+        g.2.is_empty()
+    };
+    let clickable = data.iter().map(|b| b.count_ones() as u64).sum::<u64>();
+    state.hit_cells.store(clickable, Ordering::SeqCst);
+    let bytes_len = data.len();
+    *state.hit.lock().unwrap() = (w, h, data);
+    if std::env::var("PETPOM_HIT_DEBUG").is_ok() {
+        eprintln!("[petpom] 掩码收到：hex={} 字符 → {} 字节, {clickable} 格可点", mask.len(), bytes_len);
+    } else if first {
+        eprintln!("[petpom] 命中掩码已就绪：{w}×{h} 格，其中 {clickable} 格可点（热区只覆盖宠物可见部分）");
+    } else if clickable == 0 {
+        // 0 格可点 = 宠物完全点不到，属于异常（通常是帧图未解码完就上报）
+        eprintln!("[petpom] 警告：命中掩码为空，宠物将无法点击");
+    }
+}
+
+/// 把窗口**整个**夹进某块显示器内（原来只校验左上角，导致「一半在屏幕外」）。
+/// 选显示器：优先包含该点的，否则选离该点最近的；四边各留 8px。
+fn clamp_window_pos(handle: &AppHandle, x: f64, y: f64) -> (f64, f64) {
+    let Some(w) = pet_window(handle) else { return (x, y) };
+    let scale = w.scale_factor().unwrap_or(1.0);
+    let win_w = PET_SIZE.0 * scale;
+    let win_h = PET_SIZE.1 * scale;
+    let monitors = handle.available_monitors().unwrap_or_default();
+    if monitors.is_empty() {
+        return (x, y);
+    }
+    let mut best: Option<(f64, f64, f64, f64, f64)> = None;
+    for m in &monitors {
+        let p = m.position();
+        let sz = m.size();
+        let (x0, y0) = (p.x as f64, p.y as f64);
+        let (x1, y1) = (x0 + sz.width as f64, y0 + sz.height as f64);
+        let dx = if x < x0 { x0 - x } else if x > x1 { x - x1 } else { 0.0 };
+        let dy = if y < y0 { y0 - y } else if y > y1 { y - y1 } else { 0.0 };
+        let d = dx * dx + dy * dy;
+        if best.map(|b| d < b.4).unwrap_or(true) {
+            best = Some((x0, y0, x1, y1, d));
+        }
+    }
+    if let Some((x0, y0, x1, y1, _)) = best {
+        let m = 8.0 * scale;
+        let max_x = (x1 - win_w - m).max(x0 + m);
+        let max_y = (y1 - win_h - m).max(y0 + m);
+        let cx = x.clamp(x0 + m, max_x);
+        let cy = y.clamp(y0 + m, max_y);
+        if (cx - x).abs() > 0.5 || (cy - y).abs() > 0.5 {
+            eprintln!("[petpom] 位置越界，已夹回屏内：({x:.0},{y:.0}) → ({cx:.0},{cy:.0})");
+        }
+        return (cx, cy);
+    }
+    (x, y)
+}
+
+/// 命中测试看门狗：光标不在「宠物可见部分 / 可点 UI」上时让窗口穿透鼠标。
+/// 为什么不用 CSS pointer-events：窗口是整块透明的，事件仍会被窗口吃掉；
+/// 只有动态切换 ignoresMouseEvents 才是真穿透（macOS 没有逐像素命中测试的开关）。
+fn spawn_hit_test(app: AppHandle) {
+    use std::time::Duration;
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(70));
+        let Some(state) = app.try_state::<AppState>() else { continue };
+        let Some(w) = pet_window(&app) else { continue };
+        // 纯观赏模式：始终穿透
+        if state.settings.lock().unwrap().click_through {
+            let _ = w.set_ignore_cursor_events(true);
+            continue;
+        }
+        // 交互中（拖拽）与提醒中（胶囊要能点）：不穿透，避免打断操作
+        if state.dragging.load(Ordering::SeqCst) || state.alerting.load(Ordering::SeqCst) {
+            let _ = w.set_ignore_cursor_events(false);
+            continue;
+        }
+        let (gw, gh, mask) = {
+            let g = state.hit.lock().unwrap();
+            (g.0, g.1, g.2.clone())
+        };
+        if state.hit_cells.load(Ordering::SeqCst) == 0 {
+            // 掩码无效（帧图没解码完/协议异常）：退化为整窗可点。
+            // 宁可热区大一点，也不能让宠物变成完全点不到的幽灵。
+            let _ = w.set_ignore_cursor_events(false);
+            continue;
+        }
+        if gw == 0 || gh == 0 || mask.is_empty() {
+            let _ = w.set_ignore_cursor_events(false); // 掩码未就绪：退化为整窗热区
+            continue;
+        }
+        let (Ok(cur), Ok(pos), Ok(size)) = (
+            app.cursor_position(),
+            w.outer_position(),
+            w.inner_size(),
+        ) else { continue };
+        let scale = w.scale_factor().unwrap_or(1.0);
+        // 物理 → 窗口内 CSS 像素
+        let lx = (cur.x - pos.x as f64) / scale;
+        let ly = (cur.y - pos.y as f64) / scale;
+        let w_css = size.width as f64 / scale;
+        let h_css = size.height as f64 / scale;
+        let hit = if lx >= 0.0 && ly >= 0.0 && lx < w_css && ly < h_css {
+            let cx = ((lx / w_css) * gw as f64) as usize;
+            let cy = ((ly / h_css) * gh as f64) as usize;
+            let idx = cy.min(gh as usize - 1) * gw as usize + cx.min(gw as usize - 1);
+            // 每字节 8 格，bit k 对应第 k 格（与前端打包协议一致）
+            mask.get(idx / 8)
+                .map(|b| (b >> (idx % 8)) & 1 == 1)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let _ = w.set_ignore_cursor_events(!hit);
+    });
+}
+
 /// 起拖：读一次真实窗口位置作为累加基准（只在拖拽开始时读，之后不再回读）
 #[tauri::command]
 fn drag_begin(app: AppHandle, state: tauri::State<AppState>) {
@@ -240,6 +374,15 @@ fn drag_begin(app: AppHandle, state: tauri::State<AppState>) {
 /// 结束拖拽：清理累加器（位置由 window Moved 事件落库）
 #[tauri::command]
 fn drag_end(app: AppHandle, state: tauri::State<AppState>) {
+    // 拖拽结束时夹回屏内：允许贴边，但不允许把宠物拖到看不见的地方（否则再也点不到）
+    if let Some(w) = pet_window(&app) {
+        if let Ok(pos) = w.outer_position() {
+            let (cx, cy) = clamp_window_pos(&app, pos.x as f64, pos.y as f64);
+            if (cx - pos.x as f64).abs() > 0.5 || (cy - pos.y as f64).abs() > 0.5 {
+                let _ = w.set_position(PhysicalPosition::new(cx, cy));
+            }
+        }
+    }
     *state.drag_pos.lock().unwrap() = None;
     state.dragging.store(false, Ordering::SeqCst);
     // 拖拽期间到点的提醒：松手后立刻补发（视觉上「拖完再叫」）
@@ -1284,6 +1427,19 @@ fn main() {
                         y = mp.y as f64 + msz.height as f64 - (PET_SIZE.1 + 24.0) * scale;
                     }
                 }
+                // 打印显示器布局（多屏位置问题只能靠这个诊断）
+                if let Ok(ms) = handle.available_monitors() {
+                    for (i, m) in ms.iter().enumerate() {
+                        let p = m.position();
+                        let sz = m.size();
+                        eprintln!(
+                            "[petpom] 显示器{i}: pos=({},{}) size={}×{} scale={:.2}",
+                            p.x, p.y, sz.width, sz.height, m.scale_factor()
+                        );
+                    }
+                }
+                let (x, y) = clamp_window_pos(&handle, x, y);
+                eprintln!("[petpom] 宠物窗口落在 ({x:.0},{y:.0})");
                 let _ = w.set_position(PhysicalPosition::new(x, y));
                 let _ = w.set_ignore_cursor_events(settings.click_through);
                 {
@@ -1309,6 +1465,7 @@ fn main() {
                 record_db.lock().unwrap().insert_round(start_unix, min as i64, snoozes as i64, result);
             });
             spawn_expedition_watcher(handle.clone());
+            spawn_hit_test(handle.clone());
             spawn_expedition_watcher(handle.clone());
             let timer = timer::spawn(
                 handle.clone(),
@@ -1397,6 +1554,8 @@ fn main() {
                 dragging: AtomicBool::new(false),
                 pending_alert: Mutex::new(None),
                 alert_side: Mutex::new("right".to_string()),
+                hit: Mutex::new((0, 0, Vec::new())),
+                hit_cells: std::sync::atomic::AtomicU64::new(0),
             });
 
             build_tray(&h2)?;
@@ -1441,6 +1600,7 @@ fn main() {
             mark_den_seen,
             get_current_pack,
             set_settings,
+            set_hit_mask,
             drag_begin,
             drag_move_by,
             drag_end,

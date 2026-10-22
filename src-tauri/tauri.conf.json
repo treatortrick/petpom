@@ -14,7 +14,7 @@
         "label": "pet",
         "url": "index.html",
         "width": 255,
-        "height": 315,
+        "height": 235,
         "transparent": true,
         "decorations": false,
         "alwaysOnTop": true,
